@@ -1,0 +1,5 @@
+.DS_Store
+*.log
+node_modules/
+# build artifacts — packaged per release and attached to releases, not committed
+*.mds.zip
