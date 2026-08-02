@@ -1,5 +1,5 @@
 /* ES5 service: the sole chain/transaction owner. Never touches the DOM. */
-MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("pool.js"); MDS.load("composite.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js");
+MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("pool.js"); MDS.load("composite.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js"); MDS.load("split.js");
 
 var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, keysReady:false, keysRetryBlock:0, ready:false, scanning:false, rescan:false, busy:false,
   pendingRows:[], pendingRefs:{}, filling:{}, stage:"", fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
@@ -702,6 +702,20 @@ PDService.action = function(message) {
      that lands mid-cycle now queues behind it instead of signing alongside it. `busy` still gates,
      because that one means THIS user already has a transaction in flight. */
   if (PDService.busy) return PDService.tell("ERROR", {message:"A transaction is already in flight"});
+  if (message.type === "SPLIT") {
+    data = message.data || {};
+    if (!PDService.identity || !PDService.identity.address) return PDService.tell("ERROR", {message:"Still reading your wallet identity — try again in a moment"});
+    amountD = PDService.maybeDec(data.amount);
+    if (!amountD || !amountD.gt(0)) return PDService.tell("ERROR", {message:"Enter an amount to split"});
+    PDService.busy = true; PDService.setStage("Splitting funding coins…");
+    return PandaSplit.run(PDService.cmd, PDService.identity.address, data.tokenid || "0x00", amountD, function(error, tx) {
+      PDService.busy = false;
+      if (error) { PDService.setStage("Split failed — " + error); return PDService.tell("ERROR", {message:error}); }
+      PDService.setStage("Split posted — wait for the next block, then publish the ladder");
+      PDService.tell("POSTED", {message:PandaSplit.COUNT + " funding coins requested — wait for a block, then publish", tx:tx});
+      PDService.refresh();
+    });
+  }
   if (message.type === "LIMIT") {
     data = message.data || {};
     amountD = PDService.maybeDec(data.minima); priceD = PDService.maybeDec(data.price); minRemD = PDService.dec(data.minRem);

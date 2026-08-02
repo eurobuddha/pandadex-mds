@@ -86,8 +86,26 @@ var PandaTape = PandaTape || {};
   T.init = function (done) {
     MDS.sql("CREATE TABLE IF NOT EXISTS `market_tape` (`spentcoin` varchar(160) PRIMARY KEY, `timems` bigint, `block` bigint, `price` varchar(80), `size` varchar(80), `buy` int, `partial` int, `mine` int)", function () {
       MDS.sql("CREATE TABLE IF NOT EXISTS `my_trades` (`spentcoin` varchar(160) PRIMARY KEY, `timems` bigint, `block` bigint, `price` varchar(80), `size` varchar(80), `buy` int, `maker` int, `orderid` varchar(160))", function () {
-        if (done) done();
+        T.migrateEvidence(done);
       });
+    });
+  };
+  /* Evidence columns, added after the table shipped. Probe first and only ALTER when the column
+     is genuinely absent: a bare ALTER on every launch is noise at best, and on a restricted node
+     each unnecessary statement is another approval prompt. Each column is independent, so a
+     failure on one does not abandon the rest. */
+  T.EVIDENCE_COLUMNS = [
+    ["txpowid", "varchar(160)"], ["source_kind", "varchar(16)"], ["source_coinids", "text"],
+    ["proceeds_coinid", "varchar(160)"], ["verification_status", "varchar(32)"],
+    ["verification_note", "varchar(400)"], ["verified_block", "bigint"]
+  ];
+  T.migrateEvidence = function (done, idx) {
+    var i = idx || 0, col;
+    if (i >= T.EVIDENCE_COLUMNS.length) { if (done) done(); return; }
+    col = T.EVIDENCE_COLUMNS[i];
+    MDS.sql("SELECT `" + col[0] + "` FROM `my_trades` LIMIT 1", function (probe) {
+      if (probe && probe.status) return T.migrateEvidence(done, i + 1);
+      MDS.sql("ALTER TABLE `my_trades` ADD COLUMN `" + col[0] + "` " + col[1], function () { T.migrateEvidence(done, i + 1); });
     });
   };
   T.insertOnce = function (table, row, done) {
@@ -127,9 +145,10 @@ var PandaTape = PandaTape || {};
     });
   };
   T.myTrades = function (limit, done) {
-    MDS.sql("SELECT `timems`,`price`,`size`,`buy`,`maker`,`orderid` FROM `my_trades` ORDER BY `timems` DESC LIMIT " + Number(limit || 200), function (res) {
+    /* H2 hands column names back UPPERCASED. */
+    MDS.sql("SELECT `timems`,`block`,`spentcoin`,`price`,`size`,`buy`,`maker`,`orderid`,`txpowid`,`source_kind`,`verification_status`,`verification_note` FROM `my_trades` ORDER BY `timems` DESC LIMIT " + Number(limit || 200), function (res) {
       var out = [], rows = res && res.rows || [], i, r;
-      for (i = 0; i < rows.length; i++) { r = rows[i]; out.push({timems:Number(r.TIMEMS || 0), price:r.PRICE || "0", size:r.SIZE || "0", buy:Number(r.BUY || 0) === 1, maker:Number(r.MAKER || 0) === 1, orderid:r.ORDERID || ""}); }
+      for (i = 0; i < rows.length; i++) { r = rows[i]; out.push({timems:Number(r.TIMEMS || 0), block:Number(r.BLOCK || 0), spentcoin:r.SPENTCOIN || "", price:r.PRICE || "0", size:r.SIZE || "0", buy:Number(r.BUY || 0) === 1, maker:Number(r.MAKER || 0) === 1, orderid:r.ORDERID || "", txpowid:r.TXPOWID || "", source_kind:r.SOURCE_KIND || "", verification_status:r.VERIFICATION_STATUS || "", verification_note:r.VERIFICATION_NOTE || ""}); }
       done(out);
     });
   };

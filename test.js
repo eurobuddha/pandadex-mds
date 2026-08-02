@@ -1,7 +1,7 @@
 /* Pure regression tests; run with `node test.js`. */
 var assert=require("assert"), fs=require("fs"), vm=require("vm");
 global.Decimal=require("./decimal.js");
-["covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
+["covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
 var C={coinid:"0x1",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xabc","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
 var poison=JSON.parse(JSON.stringify(C)); poison.state["3"]="0x00"; assert.strictEqual(PandaDEX.order(poison),null);
@@ -161,4 +161,58 @@ assert(outcome.err&&outcome.err.indexOf("too large")>0);
 assert(!calls.some(function(c){return c.indexOf("txncheck")===0;}));   /* refused before validation */
 assert(calls.some(function(c){return c.indexOf("txndelete")===0;}));   /* and cleaned up */
 assert.strictEqual(PandaSignLock.busy(),false);                        /* and the gate was released */
+/* SelfSplit — exact command shape (native SelfSplitTest). MINIMA omits tokenid entirely; a token
+   split puts tokenid before split. And it signs, so it must sit behind the gate. */
+assert.strictEqual(PandaSplit.command("0xme","0x00","5"),"send address:0xme amount:5 split:10");
+assert.strictEqual(PandaSplit.command("0xme",PandaDEX.USDT,"2.5"),"send address:0xme amount:2.5 tokenid:"+PandaDEX.USDT+" split:10");
+calls=[];var splitDuring=null;
+PandaSignLock.gate("holder",function(release){
+  PandaSplit.run(fakeCmd,"0xme","0x00","5",function(){});
+  splitDuring=calls.some(function(c){return c.indexOf("send ")===0;});
+  release.free();
+});
+assert.strictEqual(splitDuring,false);
+assert(calls.some(function(c){return c.indexOf("send address:0xme")===0&&c.indexOf("split:10")>0;}));
+
+/* Trade export — money in / money out from confirmed rows only, cut never rounded up. */
+var xrows=[{timems:1,block:10,price:"2",size:"3",buy:true,maker:false,spentcoin:"0xa",txpowid:"0xdead"},
+           {timems:2,block:11,price:"4",size:"1",buy:false,maker:true,spentcoin:"0xb"}];
+var xt=PandaExport.totals(xrows);
+assert.strictEqual(xt.fills,2);
+assert(xt.minimaBought.eq(3)&&xt.minimaSold.eq(1));
+assert(xt.usdtPaid.eq(6)&&xt.usdtReceived.eq(4));
+assert(xt.netMinima.eq(2)&&xt.netUsdt.eq(-2));
+/* An unpriced or zero-size row is not a trade and must not reach the export. */
+assert.strictEqual(PandaExport.totals([{price:"0",size:"5"},{price:"2",size:"0"}]).fills,0);
+/* The notional is cut down, never up: 0.333...*3 must not become 1. */
+assert(PandaExport.totals([{timems:1,price:"0.33333333",size:"3",buy:true}]).usdtPaid.lt(1));
+var xcsv=PandaExport.confirmedCsv(xrows).split("\n");
+assert.strictEqual(xcsv[0],"timestamp,block,side,minima,price_usdt_per_minima,notional_usdt,role,order_id,txpowid");
+assert(xcsv[1].indexOf("BUY")>0&&xcsv[1].indexOf("TAKER")>0);
+assert(xcsv[2].indexOf("SELL")>0&&xcsv[2].indexOf("MAKER")>0);
+/* Rows with no txpowid can only ever be locally observed — the export must not claim more. */
+var xver=PandaExport.verificationCsv(xrows).split("\n");
+assert(xver[2].indexOf(PandaExport.UNVERIFIED)>0);
+/* A field containing a comma must not break the column count. */
+assert(PandaExport.verificationCsv([{timems:1,price:"1",size:"1",verification_note:"a,b",txpowid:"0x1"}]).indexOf('"a,b"')>0);
+assert.strictEqual(PandaExport.files(xrows,{}).length,4);
+/* The running position closes where the totals say it should. */
+var xrec=PandaExport.reconciliationCsv(xrows).trim().split("\n");
+assert.strictEqual(xrec[xrec.length-1].split(",")[4],"2.00000000");
+
+/* Explorer verification — five states, and never "the trade did not happen" when the network failed. */
+assert.strictEqual(PandaExplorer.validId("0xABCdef12"),true);
+assert.strictEqual(PandaExplorer.validId("not-hex"),false);
+assert.strictEqual(PandaExplorer.classify(0,"").status,PandaExplorer.ERROR);
+assert.strictEqual(PandaExplorer.classify(404,"").status,PandaExplorer.NOT_FOUND);
+assert.strictEqual(PandaExplorer.classify(503,"").status,"EXPLORER_HTTP_503");
+assert.strictEqual(PandaExplorer.classify(200,"not json").status,PandaExplorer.ERROR);
+assert.strictEqual(PandaExplorer.classify(200,'[{"result":{"data":{"json":{"txpowid":"0x1"}}}}]').status,PandaExplorer.OK);
+assert.strictEqual(PandaExplorer.classify(200,'[{"result":{"data":{"json":null}}}]').status,PandaExplorer.NOT_FOUND);
+assert.strictEqual(PandaExplorer.classify(200,'[{"error":{"message":"boom"}}]').status,PandaExplorer.ERROR);
+/* A fill with no recorded txpowid never reaches the network at all. */
+var reached=false; PandaExplorer.request=function(){reached=true;};
+PandaExplorer.verify("",function(r){assert.strictEqual(r.status,PandaExplorer.LOCAL_ONLY);});
+assert.strictEqual(reached,false);
+assert(PandaExplorer.url("0xabc").indexOf(PandaExplorer.BASE)===0);
 console.log("PandaDEX pure tests passed");
