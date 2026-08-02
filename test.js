@@ -215,4 +215,95 @@ var reached=false; PandaExplorer.request=function(){reached=true;};
 PandaExplorer.verify("",function(r){assert.strictEqual(r.status,PandaExplorer.LOCAL_ONLY);});
 assert.strictEqual(reached,false);
 assert(PandaExplorer.url("0xabc").indexOf(PandaExplorer.BASE)===0);
+/* ---- covenant partial-fill arithmetic (native PriceMathTest) ----
+   This is the most fund-critical logic in the app: it is what the covenant checks on-chain, and
+   getting it wrong either strands a maker's funds or lets a taker underpay. Honest partials must
+   be accepted at every ratio; every way of shaving a grain must be rejected. */
+function honest(locked, want, rem, minRem) {
+  var take = PandaDEX.d(locked).sub(rem);
+  return PandaDEX.covenantAccepts(locked, want, rem, minRem || "0",
+    PandaDEX.payFor(want, locked, take), PandaDEX.newWantFor(want, locked, rem));
+}
+assert(honest("100","0.575","40"));
+assert(honest("100","0.575","1"));
+assert(honest("100","0.575","99"));
+assert(honest("1000000000","1000000000","500000000"));
+assert(honest("3","1","1"));          /* a ratio that does not divide cleanly */
+assert(honest("7","0.00000001","3")); /* sub-grain pro-rata, ceiled the maker's way */
+/* A taker shaving one grain off the payment is rejected. */
+var L="100", W="0.575", R="40", T=PandaDEX.d(L).sub(R);
+var goodPay=PandaDEX.payFor(W,L,T), goodWant=PandaDEX.newWantFor(W,L,R);
+assert.strictEqual(PandaDEX.covenantAccepts(L,W,R,"0",goodPay.sub("0.00000001"),goodWant),false);
+/* ...or one grain off the remainder's new want. */
+assert.strictEqual(PandaDEX.covenantAccepts(L,W,R,"0",goodPay,goodWant.sub("0.00000001")),false);
+/* No progress: a "partial" that leaves the order exactly as it was. */
+assert.strictEqual(PandaDEX.covenantAccepts(L,W,L,"0",goodPay,W),false);
+/* A remainder below the maker's dust floor. */
+assert.strictEqual(PandaDEX.covenantAccepts(L,W,"1","5",PandaDEX.payFor(W,L,"99"),PandaDEX.newWantFor(W,L,"1")),false);
+/* A remainder that wants MORE than the whole order did. */
+assert.strictEqual(PandaDEX.covenantAccepts(L,W,R,"0",goodPay,PandaDEX.d(W).add("0.00000001")),false);
+assert(PandaDEX.newWantFor(W,L,L).lte(PandaDEX.d(W)));
+/* Overpaying a maker is legal — only underpaying is not. */
+assert(PandaDEX.covenantAccepts(L,W,R,"0",goodPay.add("1"),goodWant));
+/* The maker is never left worse off across the split: payment plus remaining want covers it. */
+assert(goodPay.add(goodWant).gte(PandaDEX.d(W)));
+
+/* ---- hostile orders (native OrderValidationTest) ---- */
+function poisoned(mutate) { var c=JSON.parse(JSON.stringify(C)); mutate(c); return PandaDEX.order(c); }
+/* A payout addressed back at the book would let a filler recycle the funds into the covenant. */
+assert.strictEqual(poisoned(function(c){c.state["1"]=PandaDEX.ADDR;}),null);
+/* A payout address that is not a 64-hex address at all. */
+assert.strictEqual(poisoned(function(c){c.state["1"]="0xnope";}),null);
+/* Amounts finer than the chain's grain. */
+assert.strictEqual(poisoned(function(c){c.state["2"]="20.000000001";}),null);
+assert.strictEqual(poisoned(function(c){c.state["8"]="0.000000001";}),null);
+/* A negative minimum remainder. */
+assert.strictEqual(poisoned(function(c){c.state["8"]="-1";}),null);
+/* A sell that wants MINIMA back, or a buy locked in the wrong asset. */
+assert.strictEqual(poisoned(function(c){c.state["3"]="0x00";}),null);
+/* A hostile order must not be reachable through the planner either. */
+assert.strictEqual(PandaBook.plan([poisoned(function(c){c.state["1"]=PandaDEX.ADDR;})].filter(Boolean),true,"1",null,110).takes.length,0);
+
+/* ---- sweep planning (native SweepPlannerTest) ---- */
+function ask(id, minima, price, created, minRem) {
+  var c=JSON.parse(JSON.stringify(C)); c.coinid=id; c.amount=minima; c.created=String(created||100);
+  c.state["2"]=PandaDEX.d(minima).mul(price).toFixed(); c.state["4"]=id; c.state["8"]=minRem||"0";
+  return PandaDEX.order(c);
+}
+var cheap=ask("0xc","10","1",100), dear=ask("0xd","10","3",100);
+var sp=PandaBook.plan([dear,cheap],true,"15",null,110);
+assert.strictEqual(sp.takes.length,2);
+assert.strictEqual(sp.takes[0].order.coinid,"0xc");        /* best price first */
+assert.strictEqual(sp.takes[0].partial,false);             /* fill the best one whole... */
+assert.strictEqual(sp.takes[1].partial,true);              /* ...and only the last is partial */
+/* A limit price excludes anything worse. */
+assert.strictEqual(PandaBook.plan([dear,cheap],true,"15","1",110).takes.length,1);
+/* An order too close to expiry is skipped: it could lapse while the sweep is still mining. */
+assert.strictEqual(PandaBook.plan([ask("0xe","10","1",100)],true,"5",null,100+PandaDEX.EXPIRY-10).takes.length,0);
+/* The maker's dust floor shrinks the take rather than leaving an unsellable stub — and the
+   remainder it reports must be the one it actually leaves behind. Regression: the clamp used to
+   adjust the take without recomputing the remainder, so the sweep wrote a covenant output below
+   the maker's floor with amounts that did not balance. The covenant rejected it every time,
+   silently, after the taker had already paid for the proof-of-work. */
+var flooredOrder=ask("0xf","10","1",100,"4"), floored=PandaBook.plan([flooredOrder],true,"9",null,110);
+assert.strictEqual(floored.takes.length,1);
+assert(floored.takes[0].remainder.gte(4));
+assert(floored.takes[0].lockedTake.add(floored.takes[0].remainder).eq(flooredOrder.locked));
+/* ...and the covenant would actually accept what the planner produced. */
+assert(PandaDEX.covenantAccepts(flooredOrder.locked, flooredOrder.wantAmt, floored.takes[0].remainder,
+  flooredOrder.minRem, floored.takes[0].pay, PandaDEX.newWantFor(flooredOrder.wantAmt, flooredOrder.locked, floored.takes[0].remainder)));
+/* Every partial the planner emits must satisfy the covenant, clamped or not. */
+[["10","1","0","7"],["10","1","4","9"],["100","0.0575","30","55"]].forEach(function(v){
+  var o=ask("0x9"+v[3],v[0],v[1],100,v[2]), pl=PandaBook.plan([o],true,v[3],null,110), t=pl.takes[0];
+  if(!t||!t.partial) return;
+  assert(t.lockedTake.add(t.remainder).eq(o.locked));
+  assert(PandaDEX.covenantAccepts(o.locked,o.wantAmt,t.remainder,o.minRem,t.pay,PandaDEX.newWantFor(o.wantAmt,o.locked,t.remainder)));
+});
+/* Never more than one partial in a single transaction — the covenant only allows the last. */
+var many=PandaBook.plan([ask("0x1a","10","1",100),ask("0x1b","10","1",100),ask("0x1c","10","1",100)],true,"25",null,110);
+assert.strictEqual(many.takes.filter(function(t){return t.partial;}).length,1);
+assert.strictEqual(many.takes[many.takes.length-1].partial,true);
+/* A sweep never exceeds the covenant's per-transaction order cap. */
+var wide=[],wi; for(wi=0;wi<12;wi++) wide.push(ask("0x2"+wi,"10","1",100));
+assert(PandaBook.plan(wide,true,"120",null,110).takes.length<=PandaDEX.MAX_ORDERS);
 console.log("PandaDEX pure tests passed");

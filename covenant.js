@@ -47,5 +47,27 @@ var PandaDEX = PandaDEX || {};
       /^0x[0-9a-f]{64}$/i.test(o.wantAddr) && !P.eqTok(o.wantAddr,P.ADDR) &&
       o.locked.decimalPlaces() <= P.DP && o.wantAmt.decimalPlaces() <= P.DP && o.minRem.decimalPlaces() <= P.DP && !o.minRem.lt(0);
   };
+  /* ---- the partial-fill arithmetic, mirroring what the covenant enforces on-chain ----
+     Every rounding here goes the MAKER's way (ROUND_CEIL on what a taker pays and on the
+     remainder's new want), because the covenant compares by cross-multiplication with no
+     division and no rounding slack. A taker who shaves one grain off either figure is rejected,
+     and the coin is left untouched. These are named so the rule is testable rather than being
+     re-derived inline at each call site. */
+  P.payFor = function (want, locked, take) { return P.up(P.d(want).mul(take).div(locked), P.DP); };
+  P.newWantFor = function (want, locked, rem) {
+    var nw = P.up(P.d(want).mul(rem).div(locked), P.DP);
+    return nw.gt(want) ? P.d(want) : nw;   /* a remainder can never want MORE than the whole did */
+  };
+  /* The covenant's acceptance test, as plain arithmetic. If this says false the node will reject
+     the transaction, so it is worth asking before spending the proof-of-work. */
+  P.covenantAccepts = function (locked, want, rem, minRem, pay, newWant) {
+    locked = P.d(locked); want = P.d(want); rem = P.d(rem);
+    minRem = P.d(minRem); pay = P.d(pay); newWant = P.d(newWant);
+    return rem.lt(locked)                                   /* a partial must make progress */
+      && rem.gte(minRem)                                    /* ...and respect the maker's dust floor */
+      && newWant.mul(locked).gte(want.mul(rem))             /* the remainder keeps at least its pro-rata price */
+      && newWant.lte(want)
+      && pay.mul(locked).gte(want.mul(locked.sub(rem)));    /* the maker is paid at least pro-rata */
+  };
   P.script = "LET u="+P.USDT+" IF (@TOKENID NEQ 0x00 AND @TOKENID NEQ u) OR (PREVSTATE(3) NEQ 0x00 AND PREVSTATE(3) NEQ u) THEN RETURN FALSE ENDIF IF SIGNEDBY(PREVSTATE(0)) THEN IF GETOUTADDR(@INPUT) EQ @ADDRESS THEN IF SAMESTATE(0 1) AND SAMESTATE(3 5) AND SAMESTATE(7 8) AND STATE(2) GT 0 AND VERIFYOUT(@INPUT @ADDRESS @AMOUNT @TOKENID TRUE) THEN RETURN TRUE ENDIF ENDIF IF VERIFYOUT(@INPUT PREVSTATE(1) @AMOUNT @TOKENID FALSE) THEN RETURN TRUE ENDIF ENDIF IF @COINAGE GT 600 THEN RETURN VERIFYOUT(@INPUT PREVSTATE(1) @AMOUNT @TOKENID FALSE) ENDIF LET w=PREVSTATE(2) LET r=0 IF @TOTOUT GT @INPUT+1 THEN IF GETOUTADDR(@INPUT+1) EQ @ADDRESS THEN LET r=GETOUTAMT(@INPUT+1) ENDIF ENDIF IF r EQ 0 THEN RETURN VERIFYOUT(@INPUT PREVSTATE(1) w PREVSTATE(3) FALSE) ENDIF RETURN r LT @AMOUNT AND r GTE PREVSTATE(8) AND VERIFYOUT(@INPUT+1 @ADDRESS r @TOKENID TRUE) AND SAMESTATE(0 1) AND SAMESTATE(3 5) AND SAMESTATE(7 8) AND STATE(2)*@AMOUNT GTE w*r AND STATE(2) LTE w AND GETOUTADDR(@INPUT) EQ PREVSTATE(1) AND GETOUTTOK(@INPUT) EQ PREVSTATE(3) AND GETOUTAMT(@INPUT)*@AMOUNT GTE w*(@AMOUNT-r)";
 })(PandaDEX);

@@ -24,7 +24,12 @@ var PandaBook = PandaBook || {};
     side.sort(function(a,b){return buy?a.price.cmp(b.price):b.price.cmp(a.price);});
     for(i=0;i<side.length && takes.length<P.MAX_ORDERS && remaining.gt(0);i++){
       o=side[i]; var avail=o.minima, take=remaining.gte(avail)?avail:remaining, partial=take.lt(avail), lockedTake=o.sell?take:P.up(take.mul(o.price),P.DP), rem=o.locked.sub(lockedTake);
-      if(partial && rem.lt(o.minRem)){ lockedTake=o.locked.sub(o.minRem); take=o.sell?lockedTake:P.down(lockedTake.div(o.price),P.DP); if(!take.gt(0))break; partial=true; }
+      /* Shrink the take so the order keeps at least its minimum remainder. `rem` MUST be
+         recomputed here: it is what txn.js writes as the covenant's remainder output and what the
+         new want is derived from, so leaving the pre-clamp value builds a transaction whose
+         amounts do not balance and whose remainder is below the floor the covenant enforces —
+         rejected on-chain, every time, after paying for the proof-of-work. */
+      if(partial && rem.lt(o.minRem)){ lockedTake=o.locked.sub(o.minRem); take=o.sell?lockedTake:P.down(lockedTake.div(o.price),P.DP); if(!take.gt(0))break; rem=o.locked.sub(lockedTake); partial=true; }
       var pay=partial?P.up(o.wantAmt.mul(lockedTake).div(o.locked),P.DP):o.wantAmt;
       takes.push({order:o,minima:take,partial:partial,lockedTake:lockedTake,pay:pay,remainder:rem}); totalMin=totalMin.add(take); totalUsdt=totalUsdt.add(o.sell?pay:lockedTake); remaining=remaining.sub(take); if(partial)break;
     }
