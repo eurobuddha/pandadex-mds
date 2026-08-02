@@ -34,7 +34,7 @@ var PandaComposite = {};
     remaining = wantMinima;
     while (remaining.gt(0)) {
       step = Decimal.min(remaining, chunk);
-      oc = C.orderChoice(orders, oi, takenFromOrder, step);
+      oc = C.orderChoice(orders, oi, takenFromOrder, step, remaining);
       orderPrice = oc ? oc.usdt.div(oc.minima) : null;
       pc = C.poolChoice(pools, takerBuys, poolTarget, step);
       poolPrice = pc ? pc.marginalUsdt.div(pc.marginalMinima) : null;
@@ -73,12 +73,12 @@ var PandaComposite = {};
   };
   C.better = function(takerBuys, orderPrice, poolPrice) { if (!poolPrice) return false; if (!orderPrice) return true; return takerBuys ? poolPrice.lt(orderPrice) : poolPrice.gt(orderPrice); };
   C.worst = function(cur, px, takerBuys) { if (!px) return cur; if (!cur || P.d(cur).eq(0)) return px; return takerBuys ? Decimal.max(cur, px) : Decimal.min(cur, px); };
-  C.orderChoice = function(orders, idx, already, step) {
+  C.orderChoice = function(orders, idx, already, step, requestRemaining) {
     var o, avail, remAvail, take, left, lockedLeft, maxPartialLocked, maxPartialMinima, c;
     if (idx >= orders.length) return null;
     o = orders[idx]; avail = P.d(o.minima); remAvail = avail.sub(already);
     if (!remAvail.gt(0)) return null;
-    take = Decimal.min(remAvail, step); left = remAvail.sub(take);
+    take = requestRemaining && requestRemaining.gte(remAvail) ? remAvail : Decimal.min(remAvail, step); left = remAvail.sub(take);
     if (left.gt(0)) {
       lockedLeft = o.sell ? left : P.up(left.mul(o.price), P.DP);
       if (lockedLeft.lt(o.minRem)) {
@@ -116,7 +116,7 @@ var PandaComposite = {};
     var side = [], i, o, cmp;
     for (i = 0; i < (book || []).length; i++) {
       o = book[i]; if (o.sell !== takerBuys) continue;
-      if (chainBlock - Number(o.created || 0) > P.EXPIRY - 12) continue;
+      if (chainBlock - Number(o.created || 0) > P.EXPIRY - 30) continue;
       if (limitPrice) { cmp = P.d(o.price).cmp(limitPrice); if (takerBuys ? cmp > 0 : cmp < 0) continue; }
       side.push(o);
     }

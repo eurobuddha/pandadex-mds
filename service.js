@@ -1,10 +1,11 @@
 /* ES5 service: the sole chain/transaction owner. Never touches the DOM. */
-MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js");
+MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("pool.js"); MDS.load("composite.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js");
 
 var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, keysReady:false, keysRetryBlock:0, ready:false, scanning:false, rescan:false, busy:false,
   pendingRows:[], pendingRefs:{}, filling:{}, stage:"", fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
   stats:{last:null, changePct:null, high:null, low:null, volume:"0", lastFill:null},
   cancelled:{}, diff:null, restQueue:null, restQueueCoins:null, restQueueBlock:0,
+  pools:[], poolScanning:false, poolHaveLive:false, poolEmptyScans:0,
   maker:{cfg:null, working:false, lastCycleMs:0, pendingIdle:null}, processor:{working:false, startedBlock:0} };
 PDService.SWEEP_DEADLINE_BLOCKS = 6;
 /* A processor run that loses its callback would otherwise hold `working` for the whole session and
@@ -103,7 +104,7 @@ PDService.snapshot = function() {
     if (PDService.owns(order)) mine.push(order);
   }
   PDService.tell("STATE", {ready:PDService.ready, block:PDService.block, identity:PDService.identity,
-    book:PDService.book, mine:mine, pending:PDService.pendingRefs, pendingRows:PDService.pendingRows,
+    book:PDService.book, pools:PDService.pools, poolsSyncing:!PDService.poolHaveLive, mine:mine, pending:PDService.pendingRefs, pendingRows:PDService.pendingRows,
     filling:PDService.filling, stats:PDService.stats,
     stage:PDService.stage, busy:PDService.busy, tape:PDService.tape, myTrades:PDService.myTrades,
     maker:PDService.makerPublic()});
@@ -122,6 +123,28 @@ PDService.loadTape = function(done) {
         });
       });
     });
+  });
+};
+/* PandaPools discovery. Single-flight, and it does NOT believe a lone empty scan: a resyncing
+   node answers status:true with an empty list, and dropping every pool on that would make the
+   router silently fall back to book-only. Two consecutive empties against a non-empty cache are
+   required before the pools go away. Same shape as the book's own belief rule. */
+PDService.POOL_EMPTY_CONFIRM = 2;
+PDService.refreshPools = function(done) {
+  if (PDService.poolScanning) { if (done) done(); return; }
+  PDService.poolScanning = true;
+  PandaPool.scan(PDService.cmd, function(error, pools) {
+    var emptyAgainstCache;
+    PDService.poolScanning = false;
+    if (error) { if (done) done(); return; }
+    pools = pools || [];
+    emptyAgainstCache = pools.length === 0 && PDService.pools.length > 0;
+    if (emptyAgainstCache) PDService.poolEmptyScans++; else PDService.poolEmptyScans = 0;
+    if (!emptyAgainstCache || !PDService.poolHaveLive || PDService.poolEmptyScans >= PDService.POOL_EMPTY_CONFIRM) {
+      PDService.pools = pools;
+      PDService.poolHaveLive = true;
+    }
+    if (done) done();
   });
 };
 PDService.recordFill = function() {
@@ -528,8 +551,14 @@ PDService.restReady = function(book) {
   return true;
 };
 PDService.sourceStillLive = function(book, coinid) {
-  var i;
+  var i, p;
   for (i = 0; i < (book || []).length; i++) if (book[i].coinid === coinid) return true;
+  /* A composite fill also consumes pool reserve coins. Until those are gone too, the trade has
+     not landed — resting the unfilled remainder early would double-spend the funding. */
+  for (i = 0; i < (PDService.pools || []).length; i++) {
+    p = PDService.pools[i];
+    if (p.coinidM === coinid || p.coinidT === coinid) return true;
+  }
   return false;
 };
 PDService.placeRest = function() {
@@ -575,6 +604,7 @@ PDService.refresh = function() {
       if (changed) PDService.savePending();
     }
     PDService.retryKeysIfStale();
+    PDService.refreshPools();
     PDService.reconcileFill(visibleBook);
     PDService.makerOnBook();
     PDService.processorProcess();
@@ -663,7 +693,7 @@ PDService.boot = function() {
   });
 };
 PDService.action = function(message) {
-  var i, order = null, plan, rest, data, amountD, priceD, limitD, minRemD;
+  var i, order = null, plan, comp, rest, data, amountD, priceD, limitD, minRemD;
   if (message.type === "REFRESH") { if (!PDService.ready) { PDService.snapshot(); return; } return PDService.refresh(); }
   if (!PDService.ready) { PDService.setStage("PandaDEX is still starting…"); return; }
   /* Deliberately does NOT refuse while the maker or processor is working. Those are background
@@ -715,6 +745,34 @@ PDService.action = function(message) {
     if (!priceD || !priceD.gt(0)) return PDService.tell("ERROR", {message:"Enter a valid price"});
     amountD = PandaDEX.down(amountD, PandaDEX.DP); minRemD = Decimal.max(PandaDEX.d(0), PandaDEX.down(minRemD, PandaDEX.DP));
     data.minima = PandaDEX.plain(amountD); data.price = PandaDEX.plain(priceD); data.minRem = PandaDEX.plain(minRemD);
+    /* Blended route first: the composite router compares the next slice of resting book against
+       the next slice of pool curve and takes whichever is cheaper at the margin. It falls through
+       to the book-only planner whenever no pool contributes, so the order-book path is unchanged
+       when there are no pools — which is also what happens if the sentinel scan came back empty. */
+    comp = PandaComposite.plan(PDService.book, PDService.pools, !!data.buy, data.minima, data.price || null, PDService.block);
+    if (!PandaComposite.isEmpty(comp) && PandaComposite.poolCount(comp) > 0) {
+      PDService.filling = {};
+      for (i = 0; i < comp.sourceCoinIds.length; i++) PDService.filling[comp.sourceCoinIds[i]] = true;
+      rest = amountD.sub(comp.totalMinima);
+      PDService.busy = true; PDService.setStage("Building blended transaction… selecting coins and signing");
+      return PandaTxn.fillComposite(PDService.cmd, PDService.identity, comp, !!data.buy, function(error, tx) {
+        PDService.busy = false;
+        if (error) { PDService.filling = {}; PDService.setStage("Trade failed — " + error); return PDService.tell("ERROR", {message:error}); }
+        PDService.setStage("Posted — waiting for a block to confirm your " + (data.buy ? "buy" : "sell") + " of " + PandaDEX.plain(comp.totalMinima) + " MINIMA");
+        PDService.tell("POSTED", {message:"Blended trade submitted — waiting for confirmation", tx:tx});
+        /* The remainder only rests once every source coin has actually left the chain. Posting it
+           earlier would spend funding the blended transaction is still relying on. */
+        if (rest.gt(0)) {
+          PDService.restQueue = {buy:!!data.buy, minima:PandaDEX.plain(rest), price:data.price, gtc:data.gtc, minRem:data.minRem};
+          PDService.restQueueCoins = comp.sourceCoinIds.slice();
+          PDService.restQueueBlock = PDService.block;
+        }
+        PDService.fillCoins = comp.sourceCoinIds.slice();
+        PDService.fillBlock = PDService.block;
+        PDService.fillMeta = {spentcoin:comp.sourceCoinIds[0], price:PandaDEX.plain(comp.effectivePrice), size:PandaDEX.plain(comp.totalMinima), buy:!!data.buy};
+        PDService.refresh();
+      });
+    }
     plan = PandaBook.plan(PDService.book, !!data.buy, data.minima, data.price || null, PDService.block);
     if (!plan || !plan.takes || !plan.takes.length) {
       PDService.busy = true; PDService.setStage("Building transaction… selecting coins and signing");

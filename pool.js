@@ -31,7 +31,16 @@ var PandaSynthetic = {};
   Pool.funded = function(pool) { return !!(pool && P.d(pool.reserveM).gt(0) && P.d(pool.reserveT).gt(0)); };
   Pool.spotPrice = function(pool) { return Pool.funded(pool) ? P.d(pool.reserveT).div(pool.reserveM) : P.d(0); };
   Pool.state = function(coin, port) { return P.state(coin, port); };
-  Pool.scriptArg = function(script) { return '"' + String(script || "").replace(/"/g, '\\"') + '"'; };
+  /* Quote for a command parameter escaping ONLY `"` and `\` — and CRUCIALLY leaving `/` alone.
+     A JSON-style quoter turns the pool covenant's `*5/1000` into `*5\/1000`, which makes the
+     script unparseable (parseok=false) and any coin sent to that malformed address UNSPENDABLE
+     FOREVER. Adopted verbatim from pandapools-mds/covenant.js, whose script text hashes to live
+     pool addresses. */
+  Pool.scriptArg = function(script) {
+    var s = String(script || ""), out = '"', i, c;
+    for (i = 0; i < s.length; i++) { c = s.charAt(i); if (c === '"' || c === '\\') out += '\\'; out += c; }
+    return out + '"';
+  };
   Pool.clean = function(raw) {
     raw = raw || {};
     return {
