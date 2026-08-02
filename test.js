@@ -1,7 +1,7 @@
 /* Pure regression tests; run with `node test.js`. */
 var assert=require("assert"), fs=require("fs"), vm=require("vm");
 global.Decimal=require("./decimal.js");
-["covenant.js","signlock.js","book.js","pool.js","composite.js","sweep.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
+["covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
 var C={coinid:"0x1",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xabc","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
 var poison=JSON.parse(JSON.stringify(C)); poison.state["3"]="0x00"; assert.strictEqual(PandaDEX.order(poison),null);

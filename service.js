@@ -702,42 +702,6 @@ PDService.action = function(message) {
      that lands mid-cycle now queues behind it instead of signing alongside it. `busy` still gates,
      because that one means THIS user already has a transaction in flight. */
   if (PDService.busy) return PDService.tell("ERROR", {message:"A transaction is already in flight"});
-  if (message.type === "CREATE") {
-    data = message.data || {};
-    amountD = PDService.maybeDec(data.minima); priceD = PDService.maybeDec(data.price); minRemD = PDService.dec(data.minRem);
-    if (!amountD || !amountD.gt(0)) return PDService.tell("ERROR", {message:"Enter a valid MINIMA amount"});
-    if (!priceD || !priceD.gt(0)) return PDService.tell("ERROR", {message:"Enter a valid price"});
-    amountD = PandaDEX.down(amountD, PandaDEX.DP); minRemD = Decimal.max(PandaDEX.d(0), PandaDEX.down(minRemD, PandaDEX.DP));
-    data.minima = PandaDEX.plain(amountD); data.price = PandaDEX.plain(priceD); data.minRem = PandaDEX.plain(minRemD);
-    return PandaTxn.create(PDService.cmd, PDService.identity, data, function(error, tx, orderId) {
-    if (error) return PDService.tell("ERROR", {message:error});
-    PDService.addPending(PandaPending.PLACE, {orderId:orderId, buy:!!data.buy, minima:data.minima, price:data.price});
-    PDService.tell("POSTED", {message:"Order submitted — it appears after confirmation (~50 seconds)", tx:tx}); PDService.refresh();
-    });
-  }
-  if (message.type === "FILL") {
-    data = message.data || {};
-    amountD = PDService.maybeDec(data.amount); limitD = data.limit ? PDService.maybeDec(data.limit) : null;
-    if (!amountD || !amountD.gt(0)) return PDService.tell("ERROR", {message:"Enter a valid MINIMA amount"});
-    if (data.limit && (!limitD || !limitD.gt(0))) return PDService.tell("ERROR", {message:"Enter a valid limit price"});
-    data.amount = PandaDEX.plain(PandaDEX.down(amountD, PandaDEX.DP)); if (limitD) data.limit = PandaDEX.plain(limitD);
-    plan = PandaBook.plan(PDService.book, !!data.buy, data.amount, data.limit || null, PDService.block);
-    if (!plan || !plan.takes || !plan.takes.length) return PDService.tell("ERROR", {message:"No eligible orders match that sweep"});
-    PDService.filling = {};
-    for (i = 0; i < plan.takes.length; i++) PDService.filling[plan.takes[i].order.coinid] = true;
-    PDService.busy = true; PDService.setStage("Building transaction… selecting coins and signing");
-    return PandaTxn.fill(PDService.cmd, PDService.identity, plan, function(error, tx) {
-      PDService.busy = false;
-      if (error) { PDService.filling = {}; PDService.setStage("Trade failed — " + error); return PDService.tell("ERROR", {message:error}); }
-      PDService.setStage("Posted — waiting for a block to confirm your " + (data.buy ? "buy" : "sell") + " of " + PandaDEX.plain(plan.totalMinima) + " MINIMA");
-      PDService.tell("POSTED", {message:"Sweep submitted — waiting for confirmation", tx:tx});
-      PDService.fillCoins = [];
-      for (i = 0; i < plan.takes.length; i++) PDService.fillCoins.push(plan.takes[i].order.coinid);
-      PDService.fillBlock = PDService.block;
-      PDService.fillMeta = {spentcoin:plan.takes[0].order.coinid, price:plan.average, size:plan.totalMinima, buy:!!data.buy};
-      PDService.refresh();
-    });
-  }
   if (message.type === "LIMIT") {
     data = message.data || {};
     amountD = PDService.maybeDec(data.minima); priceD = PDService.maybeDec(data.price); minRemD = PDService.dec(data.minRem);

@@ -23,7 +23,7 @@ OUT="PandaDEX_${VERSION}.mds.zip"
 # Step 1: dapp.conf MUST be the first entry.
 zip -q "${OUT}" dapp.conf
 # Step 2: everything else the dapp ships.
-zip -q "${OUT}" index.html style.css fonts.css parity.css inter_var.ttf jetbrains_mono_var.ttf mds.js decimal.js covenant.js signlock.js book.js pool.js composite.js sweep.js txn.js tape.js maker.js price.js verifier.js pending.js stats.js service.js favicon.png
+zip -q "${OUT}" index.html style.css fonts.css parity.css inter_var.ttf jetbrains_mono_var.ttf mds.js decimal.js covenant.js signlock.js book.js pool.js composite.js txn.js tape.js maker.js price.js verifier.js pending.js stats.js service.js favicon.png
 
 echo "Archive contents (dapp.conf must be first):"
 echo "-------------------------------------------"
