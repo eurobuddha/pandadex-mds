@@ -3,7 +3,7 @@ var PandaDEX = PandaDEX || {};
 (function (P) {
   P.USDT = "0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90";
   P.ADDR = "0x2D43279DD85DABCA3EA90C9997DAB9169D8B7A0E8CB594236AF44542489774A5";
-  P.EXPIRY = 600; P.SCAN_DEPTH = 600; P.MAX_ORDERS = 10;
+  P.EXPIRY = 600; P.SCAN_DEPTH = 600; P.MAX_ORDERS = 5;
   P.MIN_ORDER = "0.01"; P.DP = 8; P.PRICE_DP = 12;
   Decimal.set({ precision: 40, rounding: Decimal.ROUND_DOWN, toExpNeg: -1000000000, toExpPos: 1000000000 });
   P.d = function (v) { return new Decimal(v === undefined || v === null || v === "" ? 0 : v); };

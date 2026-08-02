@@ -1,7 +1,7 @@
 /* Pure regression tests; run with `node test.js`. */
 var assert=require("assert"), fs=require("fs"), vm=require("vm");
 global.Decimal=require("./decimal.js");
-["covenant.js","book.js","sweep.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
+["covenant.js","book.js","sweep.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
 var C={coinid:"0x1",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xabc","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
 var poison=JSON.parse(JSON.stringify(C)); poison.state["3"]="0x00"; assert.strictEqual(PandaDEX.order(poison),null);
@@ -59,18 +59,6 @@ assert(PandaPending.status({kind:PandaPending.CANCEL,submitMs:now},now+4000).ind
 var stats=PandaStats.stats24h([{timems:now-PandaStats.D1-1,price:"100",size:"10"},{timems:now-3000,price:"2",size:"5"},{timems:now-1000,price:"3",size:"7"}],now);
 assert.deepStrictEqual(stats,{last:"3",changePct:"50",high:"3",low:"2",volume:"12"});
 assert.deepStrictEqual(PandaStats.lastFill([{timems:now-5000,price:"2",size:"1"},{timems:now-1000,price:"3",size:"1"}],now),{price:"3",ageMs:1000});
-var pool={address:"0xpool",opk:"0xpk",oadr:"0xowner",tok:PandaDEX.USDT,kmin:"0",reserveM:"1000",reserveT:"10",coinidM:"0xpm",coinidT:"0xpt",tokDecimals:8,covenantScript:"SCRIPT"};
-var q=PandaCurve.quoteTForMOut(pool,"10");assert(q.ok&&q.outAmount.gte("10")&&q.inAmount.gt(0));
-var route=PandaPoolRouter.routeExactMinimaOut([pool],"10");assert(route.ok&&route.poolsUsed===1&&route.totalOut.gte("10"));
-var synthetic=PandaSynthetic.sample([pool],true,"0.001",3);assert(synthetic.length>0&&PandaDEX.d(synthetic[0].poolMinima).gt(0));
-var cheapAsk=cloneOrder(C,"0xask","5",100);cheapAsk.price=PandaDEX.d("0.005");cheapAsk.usdt=PandaDEX.d("0.025");cheapAsk.wantAmt=PandaDEX.d("0.025");cheapAsk.orderId="ask1";
-var combo=PandaComposite.plan([cheapAsk],[pool],true,"20","0.02",200);
-assert(!PandaComposite.isEmpty(combo));assert(PandaComposite.poolCount(combo)>0);assert(PandaDEX.d(combo.totalMinima).gt(0));assert(combo.sourceCoinIds.indexOf("0xpm")>=0&&combo.sourceCoinIds.indexOf("0xpt")>=0);
-var builtCalls=[], builtOutcome=null;
-function comboCmd(command, cb){builtCalls.push(command);if(command.indexOf("coins relevant:true")===0)return cb({status:true,response:[{coinid:"0xfund",tokenid:PandaDEX.USDT,tokenamount:"1",amount:"1",address:"0xfunder"}]});if(command.indexOf("newscript")===0)return cb({status:true});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xcombo"}});cb({status:true});}
-PandaTxn.fillComposite(comboCmd,{address:"0xme"},combo,true,function(err,tx){builtOutcome={err:err,tx:tx};});
-var comboCreate=builtCalls.filter(function(c){return c.indexOf("txncreate id:combo_")===0;})[0], comboId=comboCreate.split("id:")[1];
-assert.deepStrictEqual(builtOutcome,{err:null,tx:"0xcombo"});assert(builtCalls.some(function(c){return c==="txninput id:"+comboId+" coinid:0xpm";}));assert(builtCalls.some(function(c){return c.indexOf("address:0xpool")>0&&c.indexOf("tokenid:"+PandaDEX.USDT)>0;}));
 /* Regression: Minima's txncheck says `validamounts`, never `amounts`. A valid owner-cancel
    must post, and must sign specifically with the owner key embedded in port 0. */
 var calls=[], outcome=null;

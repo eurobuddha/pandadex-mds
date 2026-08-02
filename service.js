@@ -1,11 +1,10 @@
 /* ES5 service: the sole chain/transaction owner. Never touches the DOM. */
-MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("book.js"); MDS.load("pool.js"); MDS.load("composite.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js");
+MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("book.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js");
 
 var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, ready:false, scanning:false, busy:false,
   pendingRows:[], pendingRefs:{}, filling:{}, stage:"", fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
   stats:{last:null, changePct:null, high:null, low:null, volume:"0", lastFill:null},
   cancelled:{}, diff:null, restQueue:null, restQueueCoins:null, restQueueBlock:0,
-  pools:[], poolScanning:false, poolHaveLive:false, poolEmptyScans:0,
   maker:{cfg:null, working:false, lastCycleMs:0, pendingIdle:null}, processor:{working:false} };
 PDService.SWEEP_DEADLINE_BLOCKS = 6;
 PDService.MAKER_MIN_CYCLE_MS = 60000;
@@ -33,6 +32,20 @@ PDService.notifyPending = function(event) {
 };
 PDService.cmd = function(command, callback) { MDS.cmd(command, function(result) { callback(result || {status:false,error:"No node response"}); }); };
 PDService.escSql = function(value) { return String(value).replace(/'/g, "''"); };
+PDService.maybeDec = function(value) {
+  try {
+    if (value === undefined || value === null || value === "" || value === "—") return null;
+    return PandaDEX.d(value);
+  } catch (ignore) {
+    return null;
+  }
+};
+PDService.dec = function(value, fallback) {
+  var d = PDService.maybeDec(value);
+  if (d) return d;
+  d = PDService.maybeDec(fallback === undefined ? 0 : fallback);
+  return d || PandaDEX.d(0);
+};
 PDService.rebuildPendingRefs = function() { PDService.pendingRefs = PandaPending.refs(PDService.pendingRows); };
 PDService.pendingInit = function(done) {
   MDS.sql("CREATE TABLE IF NOT EXISTS `pending_state` (`id` int primary key, `json` clob)", function() {
@@ -87,7 +100,7 @@ PDService.snapshot = function() {
     if (PDService.owns(order)) mine.push(order);
   }
   PDService.tell("STATE", {ready:PDService.ready, block:PDService.block, identity:PDService.identity,
-    book:PDService.book, pools:PDService.pools, poolsSyncing:!PDService.poolHaveLive, mine:mine, pending:PDService.pendingRefs, pendingRows:PDService.pendingRows,
+    book:PDService.book, mine:mine, pending:PDService.pendingRefs, pendingRows:PDService.pendingRows,
     filling:PDService.filling, stats:PDService.stats,
     stage:PDService.stage, busy:PDService.busy, tape:PDService.tape, myTrades:PDService.myTrades,
     maker:PDService.makerPublic()});
@@ -106,24 +119,6 @@ PDService.loadTape = function(done) {
         });
       });
     });
-  });
-};
-PDService.refreshPools = function(done) {
-  if (PDService.poolScanning) { if (done) done(); return; }
-  PDService.poolScanning = true;
-  PandaPool.scan(PDService.cmd, function(error, pools) {
-    var emptyAgainstCache;
-    PDService.poolScanning = false;
-    if (error) { if (done) done(); return PDService.snapshot(); }
-    pools = pools || [];
-    emptyAgainstCache = pools.length === 0 && PDService.pools.length > 0;
-    if (emptyAgainstCache) PDService.poolEmptyScans++; else PDService.poolEmptyScans = 0;
-    if (!emptyAgainstCache || !PDService.poolHaveLive || PDService.poolEmptyScans >= 2) {
-      PDService.pools = pools;
-      PDService.poolHaveLive = true;
-    }
-    PDService.snapshot();
-    if (done) done();
   });
 };
 PDService.recordFill = function() {
@@ -161,19 +156,22 @@ PDService.makerDefault = function() {
   return {pegged:true, stepPct:"0.20", levelCount:3, askSize:"0", bidSize:"0", manualMid:"0",
     skewPct:"0", repricePct:"0.25", armed:false, asks:[], bids:[], slots:{}, tombstones:{}, lastActedMid:null};
 };
-PDService.levelIn = function(level) { return {price:PandaDEX.plain(level && level.price || 0), sizeMinima:PandaDEX.plain(level && (level.sizeMinima || level.size) || 0)}; };
-PDService.levelOut = function(level) { return {price:PandaDEX.d(level && level.price || 0), sizeMinima:PandaDEX.d(level && level.sizeMinima || 0)}; };
+PDService.levelIn = function(level) { return {price:PandaDEX.plain(PDService.dec(level && level.price)), sizeMinima:PandaDEX.plain(PDService.dec(level && (level.sizeMinima || level.size)))}; };
+PDService.levelOut = function(level) { return {price:PDService.dec(level && level.price), sizeMinima:PDService.dec(level && level.sizeMinima)}; };
 PDService.normalizeMaker = function(raw) {
   var d = PDService.makerDefault(), c = raw || {}, i;
   for (i in d) if (d.hasOwnProperty(i) && c[i] !== undefined) d[i] = c[i];
   d.pegged = d.pegged !== false; d.armed = d.armed === true;
-  d.stepPct = PandaDEX.plain(d.stepPct); d.askSize = PandaDEX.plain(d.askSize); d.bidSize = PandaDEX.plain(d.bidSize);
-  d.manualMid = PandaDEX.plain(d.manualMid); d.skewPct = PandaDEX.plain(d.skewPct); d.repricePct = PandaDEX.plain(d.repricePct);
-  if (PandaDEX.d(d.skewPct).gt(20)) d.skewPct = "20";
-  if (PandaDEX.d(d.skewPct).lt(-20)) d.skewPct = "-20";
-  if (!PandaDEX.d(d.repricePct).gt(0)) d.repricePct = "0.25";
+  d.stepPct = PandaDEX.plain(PDService.dec(d.stepPct, "0.20")); d.askSize = PandaDEX.plain(PDService.dec(d.askSize)); d.bidSize = PandaDEX.plain(PDService.dec(d.bidSize));
+  d.manualMid = PandaDEX.plain(PDService.dec(d.manualMid)); d.skewPct = PandaDEX.plain(PDService.dec(d.skewPct)); d.repricePct = PandaDEX.plain(PDService.dec(d.repricePct, "0.25"));
+  if (PDService.dec(d.skewPct).gt(20)) d.skewPct = "20";
+  if (PDService.dec(d.skewPct).lt(-20)) d.skewPct = "-20";
+  if (!PDService.dec(d.repricePct).gt(0)) d.repricePct = "0.25";
   d.levelCount = Math.max(1, Math.min(PandaMaker.MAX_LEVELS, Number(d.levelCount || 3)));
-  d.asks = d.asks || []; d.bids = d.bids || []; d.slots = d.slots || {}; d.tombstones = d.tombstones || {};
+  d.asks = Array.isArray(d.asks) ? d.asks : []; d.bids = Array.isArray(d.bids) ? d.bids : [];
+  for (i = 0; i < d.asks.length; i++) d.asks[i] = PDService.levelIn(d.asks[i]);
+  for (i = 0; i < d.bids.length; i++) d.bids[i] = PDService.levelIn(d.bids[i]);
+  d.slots = d.slots && typeof d.slots === "object" ? d.slots : {}; d.tombstones = d.tombstones && typeof d.tombstones === "object" ? d.tombstones : {};
   return d;
 };
 PDService.makerLadderConfig = function() {
@@ -206,19 +204,22 @@ PDService.saveMaker = function(done) {
   });
 };
 PDService.makerMid = function() {
-  return PandaPrice && PandaPrice.mid && PandaPrice.mid() > 0 ? PandaDEX.d(PandaPrice.mid()).toDecimalPlaces(PandaDEX.PRICE_DP, Decimal.ROUND_HALF_UP) : null;
+  var mid = PandaPrice && PandaPrice.mid ? PDService.maybeDec(PandaPrice.mid()) : null;
+  return mid && mid.gt(0) ? mid.toDecimalPlaces(PandaDEX.PRICE_DP, Decimal.ROUND_HALF_UP) : null;
 };
 PDService.bookMid = function() {
-  var bid = null, ask = null, i, o;
+  var bid = null, ask = null, i, o, price;
   for (i = 0; i < PDService.book.length; i++) {
     o = PDService.book[i];
-    if (o.sell) { if (!ask || PandaDEX.d(o.price).lt(ask)) ask = PandaDEX.d(o.price); }
-    else { if (!bid || PandaDEX.d(o.price).gt(bid)) bid = PandaDEX.d(o.price); }
+    price = PDService.maybeDec(o && o.price);
+    if (!price || !price.gt(0)) continue;
+    if (o.sell) { if (!ask || price.lt(ask)) ask = price; }
+    else { if (!bid || price.gt(bid)) bid = price; }
   }
   return bid && ask ? bid.add(ask).div(2).toDecimalPlaces(PandaDEX.PRICE_DP, Decimal.ROUND_HALF_UP) : null;
 };
 PDService.makerDesired = function() {
-  var c = PDService.maker.cfg || PDService.makerDefault(), mid = c.pegged ? PDService.makerMid() : PandaDEX.d(c.manualMid || 0);
+  var c = PDService.maker.cfg || PDService.makerDefault(), mid = c.pegged ? PDService.makerMid() : PDService.dec(c.manualMid);
   return PandaMaker.desired(mid, PDService.makerLadderConfig(), c.pegged ? String(PandaPrice.widenFactor()) : "1");
 };
 PDService.makerOwnedIds = function() {
@@ -255,7 +256,7 @@ PDService.makerRun = function(actions, idx, mid, posted, chainBlock) {
   var a, createOid, input, o, newWant;
   if (idx >= actions.length) {
     PDService.maker.working = false;
-    if (posted > 0 && mid && PandaDEX.d(mid).gt(0)) PDService.maker.cfg.lastActedMid = PandaDEX.plain(mid);
+    if (posted > 0 && PDService.dec(mid).gt(0)) PDService.maker.cfg.lastActedMid = PandaDEX.plain(mid);
     PDService.saveMaker(function() { PDService.makerSetStage(posted > 0 ? "Maker: " + posted + " action" + (posted === 1 ? "" : "s") + " accepted — mining now" : "Maker: no adjustment could be posted — will retry"); PDService.snapshot(); });
     return;
   }
@@ -277,7 +278,7 @@ PDService.makerRun = function(actions, idx, mid, posted, chainBlock) {
   }
   if (a.kind === PandaMaker.K_RELOCK) {
     o = a.order;
-    newWant = o.sell ? PandaDEX.up(PandaDEX.d(o.locked).mul(a.slot.price), PandaDEX.DP) : PandaDEX.down(PandaDEX.d(o.locked).div(a.slot.price), PandaDEX.DP);
+    newWant = o.sell ? PandaDEX.up(PDService.dec(o.locked).mul(a.slot.price), PandaDEX.DP) : PandaDEX.down(PDService.dec(o.locked).div(a.slot.price), PandaDEX.DP);
     return PandaTxn.relock(PDService.cmd, o, newWant, function(error, tx) {
       if (error) { PDService.makerSetStage("Maker: RELOCK failed — " + error); return PDService.makerRun(actions, idx + 1, mid, posted, chainBlock); }
       if (PDService.maker.cfg.slots[a.slot.id]) PDService.maker.cfg.slots[a.slot.id].lastActionBlock = chainBlock;
@@ -304,7 +305,7 @@ PDService.makerOnBook = function() {
   if (PDService.maker.working) return;
   if (!c.armed) return;
   if (now - PDService.maker.lastCycleMs < PDService.MAKER_MIN_CYCLE_MS) return;
-  if (c.pegged && (!PandaDEX.d(c.stepPct).gt(0) || (!PandaMaker.hasSizedRung(PDService.makerLadderConfig().asks) && !PandaMaker.hasSizedRung(PDService.makerLadderConfig().bids)))) return;
+  if (c.pegged && (!PDService.dec(c.stepPct).gt(0) || (!PandaMaker.hasSizedRung(PDService.makerLadderConfig().asks) && !PandaMaker.hasSizedRung(PDService.makerLadderConfig().bids)))) return;
   if (c.pegged) {
     PandaPrice.refreshAsync();
     if (PandaPrice.mustWithdraw()) {
@@ -312,7 +313,7 @@ PDService.makerOnBook = function() {
       return;
     }
   }
-  mid = c.pegged ? PDService.makerMid() : PandaDEX.d(c.manualMid || 0);
+  mid = c.pegged ? PDService.makerMid() : PDService.dec(c.manualMid);
   desired = PDService.makerDesired();
   byOrderId = PDService.makerLiveById(false);
   for (k in c.slots) if (c.slots.hasOwnProperty(k)) {
@@ -328,8 +329,8 @@ PDService.makerOnBook = function() {
     else {
       liveBySlot[k] = o;
       if (r.lastActionBlock && PDService.block - Number(r.lastActionBlock) < PDService.MAKER_PATIENCE_BLOCKS) settling[k] = true;
-      postedSizes[k] = PandaDEX.d(r.size || 0);
-      if (PandaDEX.d(o.minima).lt(postedSizes[k])) partial[o.coinid] = true;
+      postedSizes[k] = PDService.dec(r.size);
+      if (PDService.dec(o.minima).lt(postedSizes[k])) partial[o.coinid] = true;
       if (o.gtc && PDService.block - Number(o.created || 0) >= PandaDEX.EXPIRY - 80) renew[k] = true;
     }
   }
@@ -338,10 +339,10 @@ PDService.makerOnBook = function() {
   ids = c.tombstones; for (k in ids) if (ids.hasOwnProperty(k)) complete = false;
   for (k = 0; k < desired.length; k++) if (!liveBySlot[desired[k].id]) complete = false;
   if (c.pegged && complete && !PandaMaker.worthRepricing(c.lastActedMid, mid, c.repricePct)) return;
-  actions = PandaMaker.reconcile(desired, liveBySlot, settling, renew, c.pegged ? PandaDEX.d(c.repricePct) : PandaDEX.d(0), partial, postedSizes, PandaMaker.budget(PDService.MAKER_MAX_ACTIONS, PDService.MAKER_MAX_CREATES_SIDE));
+  actions = PandaMaker.reconcile(desired, liveBySlot, settling, renew, c.pegged ? PDService.dec(c.repricePct) : PandaDEX.d(0), partial, postedSizes, PandaMaker.budget(PDService.MAKER_MAX_ACTIONS, PDService.MAKER_MAX_CREATES_SIDE));
   if (!actions.length) return;
   PDService.maker.lastCycleMs = now;
-  PDService.makerSetStage("Maker: " + actions.length + " adjustment" + (actions.length === 1 ? "" : "s") + (mid && PandaDEX.d(mid).gt(0) ? " at mid " + PandaDEX.d(mid).toDecimalPlaces(6, Decimal.ROUND_HALF_UP).toFixed(6) : ""));
+  PDService.makerSetStage("Maker: " + actions.length + " adjustment" + (actions.length === 1 ? "" : "s") + (PDService.dec(mid).gt(0) ? " at mid " + PDService.dec(mid).toDecimalPlaces(6, Decimal.ROUND_HALF_UP).toFixed(6) : ""));
   PDService.makerRun(actions, 0, mid, 0, PDService.block);
 };
 PDService.makerSweepTombstones = function() {
@@ -514,12 +515,8 @@ PDService.restReady = function(book) {
   return true;
 };
 PDService.sourceStillLive = function(book, coinid) {
-  var i, p;
+  var i;
   for (i = 0; i < (book || []).length; i++) if (book[i].coinid === coinid) return true;
-  for (i = 0; i < (PDService.pools || []).length; i++) {
-    p = PDService.pools[i];
-    if (p.coinidM === coinid || p.coinidT === coinid) return true;
-  }
   return false;
 };
 PDService.placeRest = function() {
@@ -541,15 +538,15 @@ PDService.refresh = function() {
   if (PDService.scanning) return;
   PDService.scanning = true;
   PandaPrice.refreshAsync();
-  PDService.refreshPools();
   PandaBook.scan(PDService.cmd, function(error, book, incomplete) {
-    var resolved, i, msg, changed;
+    var resolved, i, msg, changed, visibleBook;
     PDService.scanning = false;
     if (error) return PDService.tell("ERROR", {message:error + (incomplete ? " (keeping last good book)" : "")});
-    if (PDService.diff) PandaTape.ingest(PDService.diff, book, incomplete, PDService.block, {onFill:PDService.recordObservedFill});
-    PDService.book = book;
+    visibleBook = incomplete && PDService.book.length ? PDService.book : book;
+    if (PDService.diff) PandaTape.ingest(PDService.diff, visibleBook, incomplete, PDService.block, {onFill:PDService.recordObservedFill});
+    PDService.book = visibleBook;
     if (!incomplete) {
-      resolved = PandaPending.resolve(PDService.pendingRows, book, Date.now());
+      resolved = PandaPending.resolve(PDService.pendingRows, visibleBook, Date.now());
       changed = resolved.events.length || resolved.rows.length !== PDService.pendingRows.length;
       PDService.pendingRows = resolved.rows; PDService.pendingRefs = resolved.refs;
       for (i = 0; i < resolved.events.length; i++) {
@@ -559,11 +556,11 @@ PDService.refresh = function() {
       }
       if (changed) PDService.savePending();
     }
-    PDService.reconcileFill(book);
+    PDService.reconcileFill(visibleBook);
     PDService.makerOnBook();
     PDService.processorProcess();
     PDService.snapshot();
-    if (PDService.restReady(book)) PDService.placeRest();
+    if (PDService.restReady(visibleBook)) PDService.placeRest();
   });
 };
 PDService.scriptArg = function() { return '"' + PandaDEX.script.replace(/"/g, '\\"') + '"'; };
@@ -623,17 +620,30 @@ PDService.boot = function() {
   });
 };
 PDService.action = function(message) {
-  var i, order = null, plan, rest, data, comp;
+  var i, order = null, plan, rest, data, amountD, priceD, limitD, minRemD;
   if (message.type === "REFRESH") { if (!PDService.ready) { PDService.snapshot(); return; } return PDService.refresh(); }
   if (!PDService.ready) { PDService.setStage("PandaDEX is still starting…"); return; }
   if (PDService.busy) return PDService.tell("ERROR", {message:"A transaction is already in flight"});
-  if (message.type === "CREATE") return PandaTxn.create(PDService.cmd, PDService.identity, message.data, function(error, tx, orderId) {
+  if (message.type === "CREATE") {
+    data = message.data || {};
+    amountD = PDService.maybeDec(data.minima); priceD = PDService.maybeDec(data.price); minRemD = PDService.dec(data.minRem);
+    if (!amountD || !amountD.gt(0)) return PDService.tell("ERROR", {message:"Enter a valid MINIMA amount"});
+    if (!priceD || !priceD.gt(0)) return PDService.tell("ERROR", {message:"Enter a valid price"});
+    amountD = PandaDEX.down(amountD, PandaDEX.DP); minRemD = Decimal.max(PandaDEX.d(0), PandaDEX.down(minRemD, PandaDEX.DP));
+    data.minima = PandaDEX.plain(amountD); data.price = PandaDEX.plain(priceD); data.minRem = PandaDEX.plain(minRemD);
+    return PandaTxn.create(PDService.cmd, PDService.identity, data, function(error, tx, orderId) {
     if (error) return PDService.tell("ERROR", {message:error});
-    PDService.addPending(PandaPending.PLACE, {orderId:orderId, buy:!!message.data.buy, minima:message.data.minima, price:message.data.price});
+    PDService.addPending(PandaPending.PLACE, {orderId:orderId, buy:!!data.buy, minima:data.minima, price:data.price});
     PDService.tell("POSTED", {message:"Order submitted — it appears after confirmation (~50 seconds)", tx:tx}); PDService.refresh();
-  });
+    });
+  }
   if (message.type === "FILL") {
-    plan = PandaBook.plan(PDService.book, !!message.data.buy, message.data.amount, message.data.limit || null, PDService.block);
+    data = message.data || {};
+    amountD = PDService.maybeDec(data.amount); limitD = data.limit ? PDService.maybeDec(data.limit) : null;
+    if (!amountD || !amountD.gt(0)) return PDService.tell("ERROR", {message:"Enter a valid MINIMA amount"});
+    if (data.limit && (!limitD || !limitD.gt(0))) return PDService.tell("ERROR", {message:"Enter a valid limit price"});
+    data.amount = PandaDEX.plain(PandaDEX.down(amountD, PandaDEX.DP)); if (limitD) data.limit = PandaDEX.plain(limitD);
+    plan = PandaBook.plan(PDService.book, !!data.buy, data.amount, data.limit || null, PDService.block);
     if (!plan || !plan.takes || !plan.takes.length) return PDService.tell("ERROR", {message:"No eligible orders match that sweep"});
     PDService.filling = {};
     for (i = 0; i < plan.takes.length; i++) PDService.filling[plan.takes[i].order.coinid] = true;
@@ -641,39 +651,22 @@ PDService.action = function(message) {
     return PandaTxn.fill(PDService.cmd, PDService.identity, plan, function(error, tx) {
       PDService.busy = false;
       if (error) { PDService.filling = {}; PDService.setStage("Trade failed — " + error); return PDService.tell("ERROR", {message:error}); }
-      PDService.setStage("Posted — waiting for a block to confirm your " + (message.data.buy ? "buy" : "sell") + " of " + PandaDEX.plain(plan.totalMinima) + " MINIMA");
+      PDService.setStage("Posted — waiting for a block to confirm your " + (data.buy ? "buy" : "sell") + " of " + PandaDEX.plain(plan.totalMinima) + " MINIMA");
       PDService.tell("POSTED", {message:"Sweep submitted — waiting for confirmation", tx:tx});
       PDService.fillCoins = [];
       for (i = 0; i < plan.takes.length; i++) PDService.fillCoins.push(plan.takes[i].order.coinid);
       PDService.fillBlock = PDService.block;
-      PDService.fillMeta = {spentcoin:plan.takes[0].order.coinid, price:plan.average, size:plan.totalMinima, buy:!!message.data.buy};
+      PDService.fillMeta = {spentcoin:plan.takes[0].order.coinid, price:plan.average, size:plan.totalMinima, buy:!!data.buy};
       PDService.refresh();
     });
   }
   if (message.type === "LIMIT") {
     data = message.data || {};
-    comp = PandaComposite.plan(PDService.book, PDService.pools, !!data.buy, data.minima, data.price || null, PDService.block);
-    if (!PandaComposite.isEmpty(comp) && PandaComposite.poolCount(comp) > 0) {
-      PDService.filling = {};
-      for (i = 0; i < comp.sourceCoinIds.length; i++) PDService.filling[comp.sourceCoinIds[i]] = true;
-      rest = PandaDEX.d(data.minima).sub(comp.totalMinima);
-      PDService.busy = true; PDService.setStage("Building blended transaction… selecting coins and signing");
-      return PandaTxn.fillComposite(PDService.cmd, PDService.identity, comp, !!data.buy, function(error, tx) {
-        PDService.busy = false;
-        if (error) { PDService.filling = {}; PDService.setStage("Trade failed — " + error); return PDService.tell("ERROR", {message:error}); }
-        PDService.setStage("Posted — waiting for a block to confirm your " + (data.buy ? "buy" : "sell") + " of " + PandaDEX.plain(comp.totalMinima) + " MINIMA");
-        PDService.tell("POSTED", {message:"Blended trade submitted — waiting for confirmation", tx:tx});
-        if (rest.gt(0)) {
-          PDService.restQueue = {buy:!!data.buy, minima:PandaDEX.plain(rest), price:data.price, gtc:data.gtc, minRem:data.minRem};
-          PDService.restQueueCoins = comp.sourceCoinIds.slice();
-          PDService.restQueueBlock = PDService.block;
-        }
-        PDService.fillCoins = comp.sourceCoinIds.slice();
-        PDService.fillBlock = PDService.block;
-        PDService.fillMeta = {spentcoin:comp.sourceCoinIds[0] || tx, price:comp.effectivePrice, size:comp.totalMinima, buy:!!data.buy};
-        PDService.refresh();
-      });
-    }
+    amountD = PDService.maybeDec(data.minima); priceD = PDService.maybeDec(data.price); minRemD = PDService.dec(data.minRem);
+    if (!amountD || !amountD.gt(0)) return PDService.tell("ERROR", {message:"Enter a valid MINIMA amount"});
+    if (!priceD || !priceD.gt(0)) return PDService.tell("ERROR", {message:"Enter a valid price"});
+    amountD = PandaDEX.down(amountD, PandaDEX.DP); minRemD = Decimal.max(PandaDEX.d(0), PandaDEX.down(minRemD, PandaDEX.DP));
+    data.minima = PandaDEX.plain(amountD); data.price = PandaDEX.plain(priceD); data.minRem = PandaDEX.plain(minRemD);
     plan = PandaBook.plan(PDService.book, !!data.buy, data.minima, data.price || null, PDService.block);
     if (!plan || !plan.takes || !plan.takes.length) {
       PDService.busy = true; PDService.setStage("Building transaction… selecting coins and signing");
@@ -687,7 +680,7 @@ PDService.action = function(message) {
     }
     PDService.filling = {};
     for (i = 0; i < plan.takes.length; i++) PDService.filling[plan.takes[i].order.coinid] = true;
-    rest = PandaDEX.d(data.minima).sub(plan.totalMinima);
+    rest = PDService.dec(data.minima).sub(plan.totalMinima);
     PDService.busy = true; PDService.setStage("Building transaction… selecting coins and signing");
     return PandaTxn.fill(PDService.cmd, PDService.identity, plan, function(error, tx) {
       PDService.busy = false;
@@ -708,7 +701,8 @@ PDService.action = function(message) {
     });
   }
   if (message.type === "CANCEL") {
-    for (i = 0; i < PDService.book.length; i++) if (PDService.book[i].coinid === message.data.coinid) order = PDService.book[i];
+    data = message.data || {};
+    for (i = 0; i < PDService.book.length; i++) if (PDService.book[i].coinid === data.coinid) order = PDService.book[i];
     if (!PDService.owns(order)) return PDService.tell("ERROR", {message:"That is not one of your active orders"});
     if (PDService.pendingRefs[order.coinid] === "cancel") return PDService.tell("ERROR", {message:"That cancellation is already waiting for confirmation"});
     PDService.busy = true; PDService.setStage("Submitting cancellation…");
@@ -742,7 +736,9 @@ PDService.action = function(message) {
     if (!PDService.owns(order)) return PDService.tell("ERROR", {message:"That is not one of your active orders"});
     if (PDService.pendingRefs[order.coinid] === "cancel") return PDService.tell("ERROR", {message:"That order is already being cancelled"});
     if (String(PDService.pendingRefs[order.coinid] || "").indexOf("edit:") === 0) return PDService.tell("ERROR", {message:"That reprice is already waiting for confirmation"});
-    if (!PandaDEX.d(data.price).gt(0)) return PDService.tell("ERROR", {message:"Enter a valid new price"});
+    priceD = PDService.maybeDec(data.price);
+    if (!priceD || !priceD.gt(0)) return PDService.tell("ERROR", {message:"Enter a valid new price"});
+    data.price = PandaDEX.plain(priceD);
     PDService.busy = true; PDService.setStage("Submitting reprice…");
     return PandaTxn.relock(PDService.cmd, order, PandaTxn.newWantForPrice(order, data.price), function(error, tx) {
       PDService.busy = false;
@@ -768,8 +764,8 @@ MDS.init(function(message) {
   var packet;
   if (message.event === "inited") PDService.boot();
   else if (message.event === "NEWBLOCK") PDService.cmd("block", function(result) { PDService.block = Number(result && result.response && result.response.block || PDService.block); PDService.refresh(); });
-  else if (message.event === "MDSCOMMS" && !message.data.public) {
-    try { packet = JSON.parse(message.data.message); if (packet.origin === "ui") PDService.action(packet); }
+  else if (message.event === "MDSCOMMS" && message.data && !message.data.public) {
+    try { packet = JSON.parse(message.data.message || "{}"); if (packet.origin === "ui") PDService.action(packet); }
     catch (error) { PDService.tell("ERROR", {message:"Bad request"}); }
   }
 });
