@@ -1,12 +1,15 @@
 /* ES5 service: the sole chain/transaction owner. Never touches the DOM. */
-MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("book.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js");
+MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js");
 
-var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, ready:false, scanning:false, busy:false,
+var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, ready:false, scanning:false, rescan:false, busy:false,
   pendingRows:[], pendingRefs:{}, filling:{}, stage:"", fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
   stats:{last:null, changePct:null, high:null, low:null, volume:"0", lastFill:null},
   cancelled:{}, diff:null, restQueue:null, restQueueCoins:null, restQueueBlock:0,
-  maker:{cfg:null, working:false, lastCycleMs:0, pendingIdle:null}, processor:{working:false} };
+  maker:{cfg:null, working:false, lastCycleMs:0, pendingIdle:null}, processor:{working:false, startedBlock:0} };
 PDService.SWEEP_DEADLINE_BLOCKS = 6;
+/* A processor run that loses its callback would otherwise hold `working` for the whole session and
+   silently stop renewing GTC orders. Force-clear it after this many blocks. */
+PDService.PROCESSOR_STUCK_BLOCKS = 4;
 PDService.MAKER_MIN_CYCLE_MS = 60000;
 PDService.MAKER_MAX_ACTIONS = 4;
 PDService.MAKER_MAX_CREATES_SIDE = 1;
@@ -300,7 +303,10 @@ PDService.makerRun = function(actions, idx, mid, posted, chainBlock) {
 };
 PDService.makerOnBook = function() {
   var c = PDService.maker.cfg, now = Date.now(), mid, desired, byOrderId, liveBySlot = {}, settling = {}, partial = {}, renew = {}, postedSizes = {}, dirty = false, k, r, o, complete, actions, ids;
-  if (!c || PDService.busy || PDService.maker.working) return;
+  /* Must also stand down for the order processor: it renews GTC orders on these same blocks, and
+     two engines building transactions at once is the concurrent-signing hazard signlock.js exists
+     for. The gate would serialise them anyway; skipping here avoids the redundant work entirely. */
+  if (!c || PDService.busy || PDService.maker.working || PDService.processor.working) return;
   PDService.makerSweepTombstones();
   if (PDService.maker.working) return;
   if (!c.armed) return;
@@ -347,7 +353,7 @@ PDService.makerOnBook = function() {
 };
 PDService.makerSweepTombstones = function() {
   var c = PDService.maker.cfg, mineById, done = [], target = null, k, t, o;
-  if (!c || PDService.busy || PDService.maker.working) return;
+  if (!c || PDService.busy || PDService.maker.working || PDService.processor.working) return;
   mineById = PDService.makerLiveById(true);
   for (k in c.tombstones) if (c.tombstones.hasOwnProperty(k)) {
     t = c.tombstones[k]; o = mineById[k];
@@ -440,6 +446,10 @@ PDService.processorMark = function(coinid) {
 };
 PDService.processorClear = function(coinid) { MDS.sql("DELETE FROM `processor_inflight` WHERE `coinid`='" + PDService.escSql(coinid) + "'", function(){}); };
 PDService.processorProcess = function() {
+  /* `working` is cleared only when a run completes normally, so a callback the node never delivers
+     would wedge GTC renewal for the rest of the session — silently, which is the worst kind. Blocks
+     are the only clock the service can trust here. */
+  if (PDService.processor.working && PDService.block - PDService.processor.startedBlock > PDService.PROCESSOR_STUCK_BLOCKS) PDService.processor.working = false;
   if (PDService.processor.working || PDService.busy || PDService.maker.working || PDService.block <= 0) return;
   MDS.sql("SELECT `coinid`,`block` FROM `processor_inflight`", function(res) {
     var rows = res && res.rows || [], inflight = {}, present = {}, i, r, o, actions = [], mine, skip = PDService.makerOwnedIds();
@@ -457,6 +467,7 @@ PDService.processorProcess = function() {
       else if (PDService.block - Number(o.created || 0) > PandaDEX.EXPIRY) actions.push({kind:"collect", order:o});
     }
     if (!actions.length) return;
+    PDService.processor.startedBlock = PDService.block;
     PDService.processorRun(actions, 0);
   });
 };
@@ -535,13 +546,18 @@ PDService.placeRest = function() {
   });
 };
 PDService.refresh = function() {
-  if (PDService.scanning) return;
+  /* A NEWBLOCK arriving mid-scan used to be dropped outright. That matters more now that the
+     signing gate can defer a maker or processor action to "next refresh" — a dropped block could
+     mean the deferred work waits for a block that already came. Remember it and re-enter instead.
+     The scan itself stays single-flight; only the request is coalesced. */
+  if (PDService.scanning) { PDService.rescan = true; return; }
   PDService.scanning = true;
+  PDService.rescan = false;
   PandaPrice.refreshAsync();
   PandaBook.scan(PDService.cmd, function(error, book, incomplete) {
     var resolved, i, msg, changed, visibleBook;
     PDService.scanning = false;
-    if (error) return PDService.tell("ERROR", {message:error + (incomplete ? " (keeping last good book)" : "")});
+    if (error) { PDService.tell("ERROR", {message:error + (incomplete ? " (keeping last good book)" : "")}); if (PDService.rescan) PDService.refresh(); return; }
     visibleBook = incomplete && PDService.book.length ? PDService.book : book;
     if (PDService.diff) PandaTape.ingest(PDService.diff, visibleBook, incomplete, PDService.block, {onFill:PDService.recordObservedFill});
     PDService.book = visibleBook;
@@ -561,6 +577,7 @@ PDService.refresh = function() {
     PDService.processorProcess();
     PDService.snapshot();
     if (PDService.restReady(visibleBook)) PDService.placeRest();
+    if (PDService.rescan) PDService.refresh();
   });
 };
 PDService.scriptArg = function() { return '"' + PandaDEX.script.replace(/"/g, '\\"') + '"'; };
@@ -591,6 +608,9 @@ PDService.loadKeys = function(done) {
   });
 };
 PDService.boot = function() {
+  /* Give the signing gate its durable layer. Without this it still serialises correctly inside
+     this context; with it, a lock survives a service restart mid-chain and frees itself by TTL. */
+  PandaSignLock.use(MDS.sql);
   PDService.cmd("runscript script:" + PDService.scriptArg(), function(scriptResult) {
     var script = scriptResult && scriptResult.response && scriptResult.response.script;
     if (!scriptResult.status || !scriptResult.response.parseok || !script || String(script.address).toUpperCase() !== PandaDEX.ADDR.toUpperCase())
@@ -623,6 +643,11 @@ PDService.action = function(message) {
   var i, order = null, plan, rest, data, amountD, priceD, limitD, minRemD;
   if (message.type === "REFRESH") { if (!PDService.ready) { PDService.snapshot(); return; } return PDService.refresh(); }
   if (!PDService.ready) { PDService.setStage("PandaDEX is still starting…"); return; }
+  /* Deliberately does NOT refuse while the maker or processor is working. Those are background
+     engines that run every block; rejecting a user's cancel because the ladder happened to be
+     mid-cycle would be a worse app. signlock.js serialises the actual signing, so a user action
+     that lands mid-cycle now queues behind it instead of signing alongside it. `busy` still gates,
+     because that one means THIS user already has a transaction in flight. */
   if (PDService.busy) return PDService.tell("ERROR", {message:"A transaction is already in flight"});
   if (message.type === "CREATE") {
     data = message.data || {};

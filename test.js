@@ -1,7 +1,7 @@
 /* Pure regression tests; run with `node test.js`. */
 var assert=require("assert"), fs=require("fs"), vm=require("vm");
 global.Decimal=require("./decimal.js");
-["covenant.js","book.js","sweep.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
+["covenant.js","signlock.js","book.js","sweep.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
 var C={coinid:"0x1",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xabc","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
 var poison=JSON.parse(JSON.stringify(C)); poison.state["3"]="0x00"; assert.strictEqual(PandaDEX.order(poison),null);
@@ -69,4 +69,40 @@ calls=[];outcome=null;PandaTxn.relock(fakeCmd,sell,"30",function(err,tx){outcome
 assert.deepStrictEqual(outcome,{err:null,tx:"0xposted"});assert(calls.some(function(c){return c.indexOf("txnoutput")===0&&c.indexOf("address:"+PandaDEX.ADDR)>0&&c.indexOf("storestate:true")>0;}));assert(calls.some(function(c){return c==="txnstate id:"+calls[0].split("id:")[1]+" port:2 value:30";}));
 assert(PandaTxn.newWantForPrice(sell,"3").eq(30));
 assert(PandaTxn.newWantForPrice(buy,"4").eq(5));
+/* Serial signing gate — port of native SignGateTest. Minima keys are trees of one-time Winternitz
+   leaves, so two operations signing at once reuse a leaf and leak its private key. The gate's whole
+   job is that two operations are never open at the same time. */
+PandaSignLock.reset();
+var gateOrder=[], gateOpen=0, gateMaxOpen=0, gateRel=[];
+function gateOp(name){PandaSignLock.gate(name,function(release){gateOrder.push(name);gateOpen++;if(gateOpen>gateMaxOpen)gateMaxOpen=gateOpen;gateRel.push(release);});}
+gateOp("a");gateOp("b");gateOp("c");
+assert.deepStrictEqual(gateOrder,["a"]);                                  /* a second operation waits */
+gateOpen--;gateRel[0].free();assert.deepStrictEqual(gateOrder,["a","b"]); /* ...and starts on release */
+gateOpen--;gateRel[1].free();assert.deepStrictEqual(gateOrder,["a","b","c"]);
+gateOpen--;gateRel[2].free();gateRel[2].free();                           /* release is idempotent */
+assert.strictEqual(gateMaxOpen,1);                                        /* never two at once */
+assert.strictEqual(PandaSignLock.busy(),false);assert.strictEqual(PandaSignLock.queued(),0);
+var gateRuns=0;PandaSignLock.gate("d",function(release){gateRuns++;release.free();});
+assert.strictEqual(gateRuns,1);                                           /* empty queue runs immediately, once */
+/* A chain that throws must free the gate, not strand it until the watchdog fires. */
+PandaSignLock.gate("boom",function(){throw new Error("chain blew up");});
+var gateAfter=false;PandaSignLock.gate("after",function(release){gateAfter=true;release.free();});
+assert(gateAfter);
+/* With the durable layer injected, the claim is an INSERT whose primary-key violation IS the
+   "someone else holds it" signal, and the release is the matching DELETE. */
+var sqlLog=[];PandaSignLock.use(function(query,cb){sqlLog.push(query);cb({status:true});});
+PandaSignLock.gate("dex",function(release){release.free();});
+assert(sqlLog.some(function(q){return q.indexOf("INSERT INTO `sign_lock`")===0;}));
+assert(sqlLog.some(function(q){return q.indexOf("DELETE FROM `sign_lock` WHERE `id`=1")===0;}));
+PandaSignLock.use(null);
+/* Every signing path funnels through the gate: the txnsign chains AND the bare `send` that
+   creates an order, because `send` signs internally too. */
+calls=[];var gatedDuring=null;
+PandaSignLock.gate("holder",function(release){
+  PandaTxn.create(fakeCmd,{publickey:"0xabc",address:"0x"+"a".repeat(64)},{buy:false,minima:"10",price:"2",gtc:true,minRem:"1",orderId:"0x55"},function(){});
+  gatedDuring=calls.some(function(c){return c.indexOf("send ")===0;});
+  release.free();
+});
+assert.strictEqual(gatedDuring,false);   /* the send waited for the holder to release */
+assert(calls.some(function(c){return c.indexOf("send ")===0&&c.indexOf("address:"+PandaDEX.ADDR)>0;}));
 console.log("PandaDEX pure tests passed");
