@@ -2,6 +2,7 @@ var PandaTxn = PandaTxn || {};
 (function (T, P) {
   T.run = function (cmd, steps, fail, done, n) { n=n||0; if(n>=steps.length)return done(null); cmd(steps[n],function(r){if(!r||!r.status){if(fail)cmd("txndelete id:"+fail,function(){});return done((r&&r.error)||("Failed: "+steps[n]));}T.run(cmd,steps,fail,done,n+1);}); };
   T.id = function (prefix) { return prefix+"_"+Date.now()+"_"+Math.floor(Math.random()*1000000000); };
+  T.MAX_TX_BYTES = 60 * 1024;
   /* `signKey` may be one key, an array of keys (a batch cancel needs one signature per distinct
      owner), or nothing at all — which means `auto`. Every build->sign->post chain in this file
      funnels through here, so this is where the serial signing gate is held. See signlock.js: two
@@ -18,6 +19,17 @@ var PandaTxn = PandaTxn || {};
       /* txncheck is the only command whose response is the validation verdict. Do not infer
        * validity from txnlist or txnpost: the latter merely means mempool acceptance. */
       T.run(cmd,steps,id,function(err){ if(err)return finish(err);
+        /* Size gate before the validation gate. A transaction over the node's limit is rejected
+           at post with a far less useful error, and composite fills (pool pairs + order coins +
+           funding) are exactly the shape that overflows. A txnexport we cannot read is not
+           treated as a failure — only a size we can read and know is too big. */
+        cmd("txnexport id:"+id,function(exp){
+          var data=exp&&exp.response&&(exp.response.data||exp.response.txndata||exp.response.transaction), bytes=0;
+          if(typeof data==="string") bytes=Math.floor((data.indexOf("0x")===0?data.length-2:data.length)/2);
+          if(bytes>T.MAX_TX_BYTES){
+            cmd("txndelete id:"+id,function(){});
+            return finish("Transaction is too large ("+Math.round(bytes/1024)+"KB) — reduce the number of orders or consolidate your wallet coins");
+          }
         cmd("txncheck id:"+id,function(check){
           /* Mirror Android's proven gate. `validamounts` is the Minima verdict field;
              older node responses carry it beside `valid`, not inside it. */
@@ -31,6 +43,7 @@ var PandaTxn = PandaTxn || {};
             return finish("Transaction failed validation (scripts="+scripts+" basic="+basic+" amounts="+amounts+" mmr="+mmr+" sigs="+sigs+")");
           }
           cmd("txnpost id:"+id,function(post){if(!post||(!post.status&&!post.pending)){cmd("txndelete id:"+id,function(){});return finish((post&&post.error)||"Transaction was not accepted");}cmd("txndelete id:"+id,function(){});finish(null,post.response&&post.response.txpowid||id);});
+        });
         });
       });
     });
@@ -46,7 +59,12 @@ var PandaTxn = PandaTxn || {};
   T.newWantForPrice = function(o, price){price=P.d(price);return o.sell?P.up(P.d(o.locked).mul(price),P.DP):P.down(P.d(o.locked).div(price),P.DP);};
   T.collectExpired = function(cmd,o,done){var id=T.id("collect"),s=["txncreate id:"+id,"txninput id:"+id+" coinid:"+o.coinid,"txnoutput id:"+id+" amount:"+P.plain(o.locked)+" address:"+o.wantAddr+(P.eqTok(o.lockedTok,"0x00")?"":" tokenid:"+o.lockedTok)+" storestate:false"];T.checkPost(cmd,id,s,done);};
   T.coinValue = function(c){return P.d(P.eqTok(c.tokenid,"0x00")?c.amount:(c.tokenamount||c.amount));};
-  T.findCoins = function(cmd,payTok,needed,exclude,maxCoins,done){cmd("coins relevant:true simplestate:true",function(res){var cs=res&&res.response,chosen=[],sum=P.d(0),i,c,val,addr;if(!res||!res.status||!Array.isArray(cs))return done("Could not read funding coins");exclude=exclude||{};for(i=0;i<cs.length&&sum.lt(needed)&&chosen.length<(maxCoins||8);i++){c=cs[i];addr=String(c.address||"").toLowerCase();if(c.spent||!P.eqTok(c.tokenid,payTok)||exclude[addr])continue;val=T.coinValue(c);if(val.gt(0)){chosen.push(c);sum=sum.add(val);}}if(sum.lt(needed))return done("Insufficient confirmed funds for trade");done(null,chosen,sum);});};
+  /* `sendable:true checkmempool:true` is what `send` itself uses — without it we can pick a coin
+     already spent by an unconfirmed transaction. Filtering by tokenid server-side also keeps the
+     reply small, which matters because an over-cap MDS reply comes back empty rather than erroring
+     and would read here as "insufficient funds". */
+  T.coinQuery = function(tok){return "coins relevant:true sendable:true checkmempool:true simplestate:true tokenid:"+tok;};
+  T.findCoins = function(cmd,payTok,needed,exclude,maxCoins,done){cmd(T.coinQuery(payTok),function(res){var cs=res&&res.response,chosen=[],sum=P.d(0),i,c,val,addr;if(!res||!res.status||!Array.isArray(cs))return done("Could not read funding coins");exclude=exclude||{};for(i=0;i<cs.length&&sum.lt(needed)&&chosen.length<(maxCoins||8);i++){c=cs[i];addr=String(c.address||"").toLowerCase();if(c.spent||!P.eqTok(c.tokenid,payTok)||exclude[addr])continue;val=T.coinValue(c);if(val.gt(0)){chosen.push(c);sum=sum.add(val);}}if(sum.lt(needed))return done("Insufficient confirmed funds for trade");done(null,chosen,sum);});};
   /* Direct port of Android DexTxn.createOrder: port 8 is denominated in the LOCKED asset,
      so a buy converts the user's MINIMA remainder through its own limit price. */
   T.create = function(cmd,identity,input,done){var minima=P.down(input.minima,P.DP),price=P.d(input.price),usdt=P.up(minima.mul(price),P.DP),buy=!!input.buy,lock=buy?usdt:minima,want=buy?minima:usdt,minimaRem=P.down(input.minRem||0,P.DP),minRem=buy?P.up(minimaRem.mul(price),P.DP):minimaRem;if(minima.lt(P.MIN_ORDER)||lock.gt("1000000000"))return done("Order size is outside the permitted range");if(minRem.gt(lock))return done("Minimum remainder is larger than the order itself");/* `send` signs internally, so it needs the gate exactly as much as a txnsign chain does —
@@ -57,7 +75,7 @@ var PandaTxn = PandaTxn || {};
     if(!plan||!plan.takes||!plan.takes.length)return done("Nothing to fill");
     var buy=plan.takes[0].order.sell,payTok=buy?P.USDT:"0x00",needed=P.d(0),i,t,o,partial=null,proceeds=P.d(0),steps=[],id=T.id("sweep");
     for(i=0;i<plan.takes.length;i++){t=plan.takes[i];needed=needed.add(t.pay);proceeds=proceeds.add(t.lockedTake);if(t.partial)partial=t;}
-    cmd("coins relevant:true simplestate:true",function(res){var cs=res&&res.response,chosen=[],sum=P.d(0),c,val;if(!res||!res.status||!Array.isArray(cs))return done("Could not read funding coins");for(i=0;i<cs.length&&sum.lt(needed);i++){c=cs[i];if(c.spent||!P.eqTok(c.tokenid,payTok)||c.address===P.ADDR)continue;val=P.d(P.eqTok(payTok,"0x00")?c.amount:(c.tokenamount||c.amount));if(val.gt(0)){chosen.push(c);sum=sum.add(val);}}if(sum.lt(needed))return done("Insufficient confirmed funds for this sweep");
+    cmd(T.coinQuery(payTok),function(res){var cs=res&&res.response,chosen=[],sum=P.d(0),c,val;if(!res||!res.status||!Array.isArray(cs))return done("Could not read funding coins");for(i=0;i<cs.length&&sum.lt(needed);i++){c=cs[i];if(c.spent||!P.eqTok(c.tokenid,payTok)||c.address===P.ADDR)continue;val=P.d(P.eqTok(payTok,"0x00")?c.amount:(c.tokenamount||c.amount));if(val.gt(0)){chosen.push(c);sum=sum.add(val);}}if(sum.lt(needed))return done("Insufficient confirmed funds for this sweep");
       steps.push("txncreate id:"+id);for(i=0;i<plan.takes.length;i++)steps.push("txninput id:"+id+" coinid:"+plan.takes[i].order.coinid);for(i=0;i<chosen.length;i++)steps.push("txninput id:"+id+" coinid:"+chosen[i].coinid);
       for(i=0;i<plan.takes.length;i++){t=plan.takes[i];o=t.order;steps.push("txnoutput id:"+id+" amount:"+P.plain(t.pay)+" address:"+o.wantAddr+(P.eqTok(o.wantTok,"0x00")?"":" tokenid:"+o.wantTok)+" storestate:false");}
       if(partial){o=partial.order;steps.push("txnoutput id:"+id+" amount:"+P.plain(partial.remainder)+" address:"+P.ADDR+(P.eqTok(o.lockedTok,"0x00")?"":" tokenid:"+o.lockedTok)+" storestate:true");}

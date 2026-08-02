@@ -3,7 +3,16 @@ var PandaDEX = PandaDEX || {};
 (function (P) {
   P.USDT = "0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90";
   P.ADDR = "0x2D43279DD85DABCA3EA90C9997DAB9169D8B7A0E8CB594236AF44542489774A5";
-  P.EXPIRY = 600; P.SCAN_DEPTH = 600; P.MAX_ORDERS = 5;
+  /* HORIZON is the node's own visibility ceiling (MINIMA_CASCADE_START_DEPTH): a light node cannot
+     see a coin older than this, which is why EXPIRY must sit well under it — an order has to be
+     able to expire AND still be visible long enough for anyone to sweep it home.
+     SCAN_DEPTH must exceed EXPIRY or expired orders are simply never seen: at 600 the collect-
+     expired path could never fire, because a coin only becomes collectable at the exact age the
+     scan stopped looking. 1000 keeps us under the 1024 trim, as native does.
+     RENEW_AT is when a GTC order starts trying to renew. Native renews from age 200, leaving ~5.5h
+     of retries. MDS has no Doze-proof watcher and only runs while the node is up, so the wide
+     margin matters more here, not less. */
+  P.HORIZON = 1024; P.EXPIRY = 600; P.RENEW_AT = 200; P.SCAN_DEPTH = 1000; P.MAX_ORDERS = 5;
   P.MIN_ORDER = "0.01"; P.DP = 8; P.PRICE_DP = 12;
   Decimal.set({ precision: 40, rounding: Decimal.ROUND_DOWN, toExpNeg: -1000000000, toExpPos: 1000000000 });
   P.d = function (v) { return new Decimal(v === undefined || v === null || v === "" ? 0 : v); };

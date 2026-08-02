@@ -69,6 +69,18 @@ calls=[];outcome=null;PandaTxn.relock(fakeCmd,sell,"30",function(err,tx){outcome
 assert.deepStrictEqual(outcome,{err:null,tx:"0xposted"});assert(calls.some(function(c){return c.indexOf("txnoutput")===0&&c.indexOf("address:"+PandaDEX.ADDR)>0&&c.indexOf("storestate:true")>0;}));assert(calls.some(function(c){return c==="txnstate id:"+calls[0].split("id:")[1]+" port:2 value:30";}));
 assert(PandaTxn.newWantForPrice(sell,"3").eq(30));
 assert(PandaTxn.newWantForPrice(buy,"4").eq(5));
+/* Covenant timing constants must stay in a workable order (native OrderValidationTest pins the
+   first of these). An order has to expire while it is still visible, the scan has to reach past
+   expiry or expired orders are never collectable, and renewal has to start well before expiry. */
+assert(PandaDEX.EXPIRY < PandaDEX.HORIZON);
+assert(PandaDEX.SCAN_DEPTH < PandaDEX.HORIZON);
+assert(PandaDEX.SCAN_DEPTH > PandaDEX.EXPIRY);
+assert(PandaDEX.RENEW_AT > 0 && PandaDEX.RENEW_AT < PandaDEX.EXPIRY);
+/* A coin whose disappearance we could no longer explain must not be read as a trade. */
+assert(PandaTape.VANISH_AGE < PandaDEX.SCAN_DEPTH && PandaTape.VANISH_AGE > PandaDEX.EXPIRY);
+/* Funding queries mirror what `send` itself does, and filter by token server-side so the reply
+   stays well under the MDS size cap. */
+assert.strictEqual(PandaTxn.coinQuery(PandaDEX.USDT),"coins relevant:true sendable:true checkmempool:true simplestate:true tokenid:"+PandaDEX.USDT);
 /* Serial signing gate — port of native SignGateTest. Minima keys are trees of one-time Winternitz
    leaves, so two operations signing at once reuse a leaf and leak its private key. The gate's whole
    job is that two operations are never open at the same time. */
@@ -105,4 +117,13 @@ PandaSignLock.gate("holder",function(release){
 });
 assert.strictEqual(gatedDuring,false);   /* the send waited for the holder to release */
 assert(calls.some(function(c){return c.indexOf("send ")===0&&c.indexOf("address:"+PandaDEX.ADDR)>0;}));
+/* A transaction over the node's size limit is refused before txncheck, and the stored txn is
+   always deleted — never left behind in txnlist. An unreadable txnexport is NOT a failure. */
+calls=[];outcome=null;
+function bigCmd(command,cb){calls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x"+"ab".repeat(70*1024)}});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xposted"}});cb({status:true});}
+PandaTxn.cancel(bigCmd,sell,function(err,tx){outcome={err:err,tx:tx};});
+assert(outcome.err&&outcome.err.indexOf("too large")>0);
+assert(!calls.some(function(c){return c.indexOf("txncheck")===0;}));   /* refused before validation */
+assert(calls.some(function(c){return c.indexOf("txndelete")===0;}));   /* and cleaned up */
+assert.strictEqual(PandaSignLock.busy(),false);                        /* and the gate was released */
 console.log("PandaDEX pure tests passed");

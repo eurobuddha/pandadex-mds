@@ -1,7 +1,7 @@
 /* ES5 service: the sole chain/transaction owner. Never touches the DOM. */
 MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js");
 
-var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, ready:false, scanning:false, rescan:false, busy:false,
+var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, keysReady:false, keysRetryBlock:0, ready:false, scanning:false, rescan:false, busy:false,
   pendingRows:[], pendingRefs:{}, filling:{}, stage:"", fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
   stats:{last:null, changePct:null, high:null, low:null, volume:"0", lastFill:null},
   cancelled:{}, diff:null, restQueue:null, restQueueCoins:null, restQueueBlock:0,
@@ -307,6 +307,7 @@ PDService.makerOnBook = function() {
      two engines building transactions at once is the concurrent-signing hazard signlock.js exists
      for. The gate would serialise them anyway; skipping here avoids the redundant work entirely. */
   if (!c || PDService.busy || PDService.maker.working || PDService.processor.working) return;
+  if (!PDService.keysUsable()) return;   /* a blind key set cannot tell its own rungs from a stranger's */
   PDService.makerSweepTombstones();
   if (PDService.maker.working) return;
   if (!c.armed) return;
@@ -337,7 +338,7 @@ PDService.makerOnBook = function() {
       if (r.lastActionBlock && PDService.block - Number(r.lastActionBlock) < PDService.MAKER_PATIENCE_BLOCKS) settling[k] = true;
       postedSizes[k] = PDService.dec(r.size);
       if (PDService.dec(o.minima).lt(postedSizes[k])) partial[o.coinid] = true;
-      if (o.gtc && PDService.block - Number(o.created || 0) >= PandaDEX.EXPIRY - 80) renew[k] = true;
+      if (o.gtc && PDService.block - Number(o.created || 0) >= PandaDEX.RENEW_AT) renew[k] = true;
     }
   }
   complete = true;
@@ -451,6 +452,7 @@ PDService.processorProcess = function() {
      are the only clock the service can trust here. */
   if (PDService.processor.working && PDService.block - PDService.processor.startedBlock > PDService.PROCESSOR_STUCK_BLOCKS) PDService.processor.working = false;
   if (PDService.processor.working || PDService.busy || PDService.maker.working || PDService.block <= 0) return;
+  if (!PDService.keysUsable()) return;   /* never renew or collect against a key set we could not read */
   MDS.sql("SELECT `coinid`,`block` FROM `processor_inflight`", function(res) {
     var rows = res && res.rows || [], inflight = {}, present = {}, i, r, o, actions = [], mine, skip = PDService.makerOwnedIds();
     for (i = 0; i < rows.length; i++) {
@@ -463,7 +465,7 @@ PDService.processorProcess = function() {
     for (i = 0; i < PDService.book.length && actions.length < 2; i++) {
       o = PDService.book[i];
       if (!PDService.owns(o) || skip[o.orderId] || inflight[o.coinid]) continue;
-      if (o.gtc && PDService.block - Number(o.created || 0) >= PandaDEX.EXPIRY - 80 && PDService.block - Number(o.created || 0) <= PandaDEX.EXPIRY) actions.push({kind:"renew", order:o});
+      if (o.gtc && PDService.block - Number(o.created || 0) >= PandaDEX.RENEW_AT && PDService.block - Number(o.created || 0) <= PandaDEX.EXPIRY) actions.push({kind:"renew", order:o});
       else if (PDService.block - Number(o.created || 0) > PandaDEX.EXPIRY) actions.push({kind:"collect", order:o});
     }
     if (!actions.length) return;
@@ -572,6 +574,7 @@ PDService.refresh = function() {
       }
       if (changed) PDService.savePending();
     }
+    PDService.retryKeysIfStale();
     PDService.reconcileFill(visibleBook);
     PDService.makerOnBook();
     PDService.processorProcess();
@@ -581,31 +584,51 @@ PDService.refresh = function() {
   });
 };
 PDService.scriptArg = function() { return '"' + PandaDEX.script.replace(/"/g, '\\"') + '"'; };
+/* NEVER SHRINK ON FAILURE. The old version emptied both sets before querying, so a node that
+   failed to answer `keys action:list` left the service owning nothing — and owns() returning false
+   for the user's own orders is not a display bug: the maker cannot see its own rungs, decides they
+   are missing, and posts the whole ladder a second time. Build into local maps and full-replace
+   each half only when the node actually answered. Each half is independent, so a `scripts` failure
+   never discards good keys. Retries ride the block clock; this service runs no timers. */
+PDService.KEY_RETRY_BLOCKS = 4;
 PDService.loadKeys = function(done) {
-  PDService.keyset = {}; PDService.addrset = {};
-  if (PDService.identity && PDService.identity.publickey) PDService.keyset[PDService.identity.publickey] = true;
-  if (PDService.identity && PDService.identity.address) PDService.addrset[PDService.identity.address] = true;
+  var keys = {}, addrs = {};
+  if (PDService.identity && PDService.identity.publickey) keys[PDService.identity.publickey] = true;
+  if (PDService.identity && PDService.identity.address) addrs[PDService.identity.address] = true;
   /* Keys rather than the current receive address identify an order owner. A later wallet
      address must not hide an order that the user can still cancel. */
   PDService.cmd("keys action:list", function(result) {
     /* Nodes return either response:[{publickey:...}] or response:{keys:[...]}. */
-    var rows = result && result.response, i, entry, key;
+    var rows = result && result.response, i, entry, key, gotKeys = false;
     if (rows && !Array.isArray(rows) && Array.isArray(rows.keys)) rows = rows.keys;
     if (rows && rows.length) for (i = 0; i < rows.length; i++) {
       entry = rows[i];
       key = typeof entry === "string" ? entry : (entry.publickey || entry.key);
-      if (key) PDService.keyset[key] = true;
+      if (key) { keys[key] = true; gotKeys = true; }
     }
     PDService.cmd("scripts", function(scriptRows) {
-      var scripts = scriptRows && scriptRows.response, j, sc, addr;
+      var scripts = scriptRows && scriptRows.response, j, sc, addr, gotAddrs = false;
       if (scripts && !Array.isArray(scripts) && Array.isArray(scripts.scripts)) scripts = scripts.scripts;
       if (scripts && scripts.length) for (j = 0; j < scripts.length; j++) {
         sc = scripts[j]; addr = typeof sc === "string" ? sc : sc.address;
-        if (addr) PDService.addrset[addr] = true;
+        if (addr) { addrs[addr] = true; gotAddrs = true; }
       }
+      if (gotKeys) PDService.keyset = keys;
+      if (gotAddrs) PDService.addrset = addrs;
+      PDService.keysReady = gotKeys;
+      PDService.keysRetryBlock = PDService.block;
       done();
     });
   });
+};
+/* True once the node has actually listed the wallet's keys. Until then every ownership answer is
+   a guess, and acting on a guess means duplicate ladders and renewals of orders we do not own. */
+PDService.keysUsable = function() { return PDService.keysReady === true; };
+PDService.retryKeysIfStale = function() {
+  if (PDService.keysUsable() || PDService.block <= 0) return;
+  if (PDService.block - Number(PDService.keysRetryBlock || 0) < PDService.KEY_RETRY_BLOCKS) return;
+  PDService.keysRetryBlock = PDService.block;
+  PDService.loadKeys(function() {});
 };
 PDService.boot = function() {
   /* Give the signing gate its durable layer. Without this it still serialises correctly inside
