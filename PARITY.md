@@ -247,9 +247,12 @@ Evidence must also be newer than the last block the order was seen alive.
 
 **Layer 3 — UNKNOWN, dropped.** Never recorded. A lost trade is invisible; a phantom one is not.
 
-**Port-back list for the APK:** `history.js` (`findSpends` / `verdictFor`) ahead of `FillVerifier`,
-and `adjudicateBatch` / `findUnclaimed` / `earliest` replacing its per-order adjudication.
-`tape.js` supplies the last-seen block both rely on.
+**PORTED BACK — native 0.4.0 (2026-08-03), `apks/pandadex` commit `33c0f62`.** `history.js` became
+`DexHistory.java` (`findSpends` / `verdictFor`), `adjudicateBatch` / `findUnclaimed` / `earliest`
+replaced `FillVerifier`'s per-order adjudication, and `FillSettler.java` chains the two with
+UNKNOWN dropped. `FillTape` now tracks the last block each order was seen resting and passes it to
+the sink, which is what `tape.js` supplies here. 236 native tests pass, 22 of them new. The APK is
+not built or published.
 
 **Residual, accepted:** a stranger's fill, filled by another stranger, whose payout was spent onward
 before we looked. Not wallet-relevant so history cannot see it, and no unspent coin remains to point
@@ -272,5 +275,6 @@ book's confirm-count belief rule; and restricted-node pending-sign (not needed f
 **No Partials remain that move money or state.** The ASSETS balance detail closed in 0.4.4 and the ZIP export in 0.4.5; what is left is cosmetic (§2 ticker pulse animation, §4 cold-start book paint from cache).
 Everything else is cosmetic or a platform limit.
 
-Fill adjudication (§15) is now **ahead** of native on two counts — true-history verification and
-exclusive evidence — and both are queued to be ported back to the APK.
+Fill adjudication (§15) was ahead of native on two counts — true-history verification and exclusive
+evidence. **Both were ported back on 2026-08-03** (native 0.4.0), so the two apps now adjudicate a
+vanished order the same way.
