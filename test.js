@@ -500,4 +500,145 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
     });
   });
 })();
+/* ---- END-TO-END: boot the real service and post a trade, in the real service scope ----
+   Everything above tests modules in isolation. Nothing tested that service.js actually boots and
+   that a trade reaches txnpost — which is why a broken signing gate, and later a restructured
+   LIMIT handler, could ship. This drives the genuine service against a mock node. */
+(function () {
+  var vmmod = require("vm"), fsmod = require("fs"), ADDR = null, MYADDR = "0x" + "b".repeat(64), sent = [], inited = null;
+  function coinsFor(cmdstr) {
+    if (cmdstr.indexOf("address:" + ADDR) > 0) {                       /* the order book */
+      return [{ coinid:"0xbid1", tokenid:"0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90",
+                tokenamount:"20", amount:"20", created:"990",
+                state:{ "0":"0xstranger", "1":"0x"+"c".repeat(64), "2":"10", "3":"0x00", "4":"0xbid1", "5":"0", "7":"0", "8":"0" } }];
+    }
+    if (cmdstr.indexOf("relevant:true") === 0 || cmdstr.indexOf("coins relevant:true") === 0) {
+      return [{ coinid:"0xfund", tokenid:"0x00", amount:"100000", address:MYADDR }];  /* wallet funding */
+    }
+    return [];                                                          /* sentinel / pools: none */
+  }
+  var sandbox = {
+    Object:Object, Array:Array, Function:Function, String:String, Number:Number, Boolean:Boolean,
+    Date:Date, Math:Math, JSON:JSON, RegExp:RegExp, Error:Error, TypeError:TypeError,
+    isNaN:isNaN, isFinite:isFinite, parseInt:parseInt, parseFloat:parseFloat,
+    MDS: {
+      init: function (cb) { inited = cb; },
+      load: function () {},   /* the real service has this; modules are already in the scope */
+      log: function () {}, notify: function () {},
+      sql: function (q, cb) { if (cb) cb({ status:true, rows:[] }); },
+      comms: { solo: function (m, cb) { if (cb) cb(); } },
+      net: { GET: function (u, cb) { if (cb) cb({ status:false }); } },
+      cmd: function (c, cb) {
+        sent.push(c);
+        var r = { status:true };
+        if (c.indexOf("runscript") === 0) r = { status:true, response:{ parseok:true, script:{ address:ADDR } } };
+        else if (c.indexOf("getaddress") === 0) r = { status:true, response:{ address:MYADDR, publickey:"0xmypk", miniaddress:"MxABC" } };
+        else if (c.indexOf("keys action:list") === 0) r = { status:true, response:[{ publickey:"0xmypk" }] };
+        else if (c.indexOf("scripts") === 0) r = { status:true, response:[{ address:MYADDR }] };
+        else if (c.indexOf("block") === 0) r = { status:true, response:{ block:1000 } };
+        else if (c.indexOf("coins") === 0) r = { status:true, response:coinsFor(c) };
+        else if (c.indexOf("random") === 0) r = { status:true, response:{ random:"0xnewid" } };
+        else if (c.indexOf("txnexport") === 0) r = { status:true, response:{ data:"0x00" } };
+        else if (c.indexOf("txncheck") === 0) r = { status:true, response:{ valid:{ scripts:true, basic:true, mmrproofs:true, validamounts:true }, allsignaturesvalid:true } };
+        else if (c.indexOf("txnpost") === 0) r = { pending:true, response:{ txpowid:"0xposted" } };
+        if (cb) cb(r);
+      }
+    }
+  };
+  vmmod.createContext(sandbox);
+  ["decimal.js","covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
+   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js"].forEach(function (f) {
+    vmmod.runInContext(fsmod.readFileSync(f, "utf8"), sandbox, { filename:f });
+  });
+  ADDR = vmmod.runInContext("PandaDEX.ADDR", sandbox);
+  vmmod.runInContext(fsmod.readFileSync("service.js", "utf8"), sandbox, { filename:"service.js" });
+  assert(inited, "service.js never called MDS.init");
+  inited({ event:"inited" });
+  assert.strictEqual(vmmod.runInContext("PDService.ready", sandbox), true, "the service did not finish booting");
+  assert.strictEqual(vmmod.runInContext("PDService.book.length", sandbox), 1, "the service did not parse the order book");
+  /* Sell into the resting bid — the direction that was failing on the live node. */
+  sent.length = 0;
+  vmmod.runInContext("PDService.action({type:'LIMIT',data:{buy:false,minima:'5',price:'1',gtc:true,minRem:'0'}});", sandbox);
+  assert(sent.some(function (c) { return c.indexOf("txncreate") === 0; }), "no transaction was built");
+  assert(sent.some(function (c) { return c.indexOf("txninput") === 0 && c.indexOf("0xbid1") > 0; }), "the resting order was not consumed");
+  assert(sent.some(function (c) { return c.indexOf("txnsign") === 0; }), "the transaction was never signed");
+  assert(sent.some(function (c) { return c.indexOf("txnpost") === 0; }), "the transaction was never posted");
+  assert.strictEqual(vmmod.runInContext("PDService.busy", sandbox), false, "busy was left set after the trade");
+  assert.strictEqual(vmmod.runInContext("PandaSignLock.busy()", sandbox), false, "the signing gate was left held");
+  /* And the trade is remembered for recording, with its evidence. */
+  var meta = JSON.parse(vmmod.runInContext("JSON.stringify(PDService.fillMeta||null)", sandbox));
+  assert(meta && meta.spentcoin === "0xbid1", "the fill was not recorded for reconciliation");
+  assert.strictEqual(meta.sourceKind, "BOOK");
+  assert.strictEqual(meta.txpowid, "0xposted");
+})();
+/* Same harness, now with a live PandaPools pool — the blended path that failed on mainnet. */
+(function () {
+  var vmmod = require("vm"), fsmod = require("fs"), ADDR = null, SENT = "0x50414E4441504F4F4C53",
+      POOL = "0x" + "d".repeat(64), MYADDR = "0x" + "b".repeat(64), USDT = null, sent = [], inited = null;
+  var sandbox = {
+    Object:Object, Array:Array, Function:Function, String:String, Number:Number, Boolean:Boolean,
+    Date:Date, Math:Math, JSON:JSON, RegExp:RegExp, Error:Error, TypeError:TypeError,
+    isNaN:isNaN, isFinite:isFinite, parseInt:parseInt, parseFloat:parseFloat,
+    MDS: {
+      init:function(cb){inited=cb;}, load:function(){}, log:function(){}, notify:function(){},
+      sql:function(q,cb){ if(cb) cb({status:true,rows:[]}); },
+      comms:{ solo:function(m,cb){ if(cb) cb(); } },
+      net:{ GET:function(u,cb){ if(cb) cb({status:false}); } },
+      cmd:function(c,cb){
+        sent.push(c);
+        var r={status:true};
+        if(c.indexOf("runscript")===0)
+          r={status:true,response:{parseok:true,script:{address:(c.indexOf("PREVSTATE(0)")>0?ADDR:POOL)}}};
+        else if(c.indexOf("getaddress")===0) r={status:true,response:{address:MYADDR,publickey:"0xmypk",miniaddress:"MxABC"}};
+        else if(c.indexOf("keys action:list")===0) r={status:true,response:[{publickey:"0xmypk"}]};
+        else if(c.indexOf("scripts")===0) r={status:true,response:[{address:MYADDR}]};
+        else if(c.indexOf("block")===0) r={status:true,response:{block:1000}};
+        else if(c.indexOf("random")===0) r={status:true,response:{random:"0xnewid"}};
+        else if(c.indexOf("txnexport")===0) r={status:true,response:{data:"0x00"}};
+        else if(c.indexOf("txncheck")===0) r={status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}};
+        else if(c.indexOf("txnpost")===0) r={pending:true,response:{txpowid:"0xcomposite"}};
+        else if(c.indexOf("coins")===0){
+          var rows=[];
+          if(c.indexOf("address:"+SENT)>0)                                   /* the pool beacon */
+            rows=[{coinid:"0xbeacon",tokenid:"0x00",amount:"0.000000001",created:"900",
+                   state:{"2":USDT,"3":"0xowneraddr","4":"0xownerpk","5":"0"}}];
+          else if(c.indexOf("address:"+POOL)>0)                              /* the reserves */
+            rows=[{coinid:"0xpoolM",tokenid:"0x00",amount:"2000",created:"950"},
+                  {coinid:"0xpoolT",tokenid:USDT,tokenamount:"10",amount:"10",created:"950"}];
+          else if(c.indexOf("address:"+ADDR)>0) rows=[];                     /* empty order book */
+          else if(c.indexOf("relevant:true")>0) rows=[{coinid:"0xfund",tokenid:"0x00",amount:"100000",address:MYADDR}];
+          r={status:true,response:rows};
+        }
+        if(cb) cb(r);
+      }
+    }
+  };
+  vmmod.createContext(sandbox);
+  ["decimal.js","covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
+   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js"].forEach(function(f){
+    vmmod.runInContext(fsmod.readFileSync(f,"utf8"), sandbox, {filename:f});
+  });
+  ADDR = vmmod.runInContext("PandaDEX.ADDR", sandbox);
+  USDT = vmmod.runInContext("PandaDEX.USDT", sandbox);
+  vmmod.runInContext(fsmod.readFileSync("service.js","utf8"), sandbox, {filename:"service.js"});
+  inited({event:"inited"});
+  assert.strictEqual(vmmod.runInContext("PDService.ready", sandbox), true);
+  assert.strictEqual(vmmod.runInContext("PDService.pools.length", sandbox), 1, "the pool was not discovered");
+  sent.length = 0;
+  vmmod.runInContext("PDService.action({type:'LIMIT',data:{buy:false,minima:'50',price:'0.001',gtc:true,minRem:'0'}});", sandbox);
+  /* The pool legs must be spent as an ADJACENT PAIR starting at input 0 — the PandaPools covenant
+     asserts the MINIMA leg sits at an even index with its token leg immediately after. */
+  var inputs = sent.filter(function(c){ return c.indexOf("txninput") === 0; });
+  assert(inputs.length >= 2, "the composite consumed no pool reserves");
+  assert(inputs[0].indexOf("0xpoolM") > 0, "the MINIMA reserve was not the first input");
+  assert(inputs[1].indexOf("0xpoolT") > 0, "the token reserve did not immediately follow it");
+  /* Pool covenants must be registered untracked, or every stranger's liquidity reads as ours. */
+  assert(sent.some(function(c){ return c.indexOf("newscript trackall:false") === 0; }), "the pool covenant was not registered");
+  assert(!sent.some(function(c){ return c.indexOf("trackall:true") > 0; }));
+  assert(sent.some(function(c){ return c.indexOf("txnpost") === 0; }), "the blended transaction was never posted");
+  assert.strictEqual(vmmod.runInContext("PDService.busy", sandbox), false);
+  var meta = JSON.parse(vmmod.runInContext("JSON.stringify(PDService.fillMeta||null)", sandbox));
+  assert(meta && meta.sourceKind === "POOL", "a pool-only fill should record source POOL, got " + (meta && meta.sourceKind));
+  assert.strictEqual(meta.txpowid, "0xcomposite");
+})();
 console.log("PandaDEX pure tests passed");

@@ -150,13 +150,35 @@ PDService.loadTape = function(done) {
    router silently fall back to book-only. Two consecutive empties against a non-empty cache are
    required before the pools go away. Same shape as the book's own belief rule. */
 PDService.POOL_EMPTY_CONFIRM = 2;
+PDService.poolWaiters = [];
 PDService.refreshPools = function(done) {
-  if (PDService.poolScanning) { if (done) done(); return; }
+  var emptyAgainstCache;
+  /* If a scan is already running, WAIT for it rather than returning the stale snapshot — a trade
+     about to be planned must not be handed pool reserves that are already a block old. */
+  if (PDService.poolScanning) { if (done) PDService.poolWaiters.push(done); return; }
   PDService.poolScanning = true;
+  if (done) PDService.poolWaiters.push(done);
+  function finishPools() {
+    var waiters = PDService.poolWaiters, i;
+    PDService.poolWaiters = [];
+    /* Report, never swallow. A silently-eaten exception here left the UI on "Checking pool
+       liquidity" forever with no transaction and no error — the failure mode this whole release
+       exists to eliminate. */
+    for (i = 0; i < waiters.length; i++) {
+      try { waiters[i](); }
+      catch (error) {
+        PDService.notifyLog("pool-wait callback failed: " + error);
+        PDService.setBusy(false);
+        PDService.setStage("Could not plan the trade — " + (error && error.message ? error.message : error));
+        PDService.tell("ERROR", {message:"Could not plan the trade — " + (error && error.message ? error.message : error)});
+      }
+    }
+  }
   PandaPool.scan(PDService.cmd, function(error, pools) {
-    var emptyAgainstCache;
     PDService.poolScanning = false;
-    if (error) { if (done) done(); return; }
+    /* A failed scan keeps the previous snapshot, which is the right call for rendering but means
+       a trade could be planned against reserves that have since moved. Say so rather than hide it. */
+    if (error) { PDService.notifyLog("pool scan failed: " + error); finishPools(); return; }
     pools = pools || [];
     emptyAgainstCache = pools.length === 0 && PDService.pools.length > 0;
     if (emptyAgainstCache) PDService.poolEmptyScans++; else PDService.poolEmptyScans = 0;
@@ -164,15 +186,40 @@ PDService.refreshPools = function(done) {
       PDService.pools = pools;
       PDService.poolHaveLive = true;
     }
-    if (done) done();
+    finishPools();
   });
 };
+/* The tape suppresses a vanish it knows we cancelled. That map was written in exactly one place —
+   inside recordObservedFill, AFTER adjudication had already run — so no cancel we submitted was
+   ever pre-registered, and the tape fell back to guessing from address-and-amount evidence. That
+   guess is what turned a cancelled ask rung's refund into a "fill" for every bid rung of the same
+   size. Register at submit time, and persist it so a restart does not forget. */
+PDService.CANCEL_KEEP_MS = 24 * 60 * 60 * 1000;
+PDService.cancelInit = function(done) {
+  MDS.sql("CREATE TABLE IF NOT EXISTS `cancelled_coins` (`coinid` varchar(160) primary key, `ts` bigint)", function() {
+    MDS.sql("DELETE FROM `cancelled_coins` WHERE `ts`<" + (Date.now() - PDService.CANCEL_KEEP_MS), function() {
+      MDS.sql("SELECT `coinid` FROM `cancelled_coins`", function(res) {
+        var rows = (res && res.rows) || [], i, id;
+        for (i = 0; i < rows.length; i++) { id = rows[i].COINID || rows[i].coinid; if (id) PDService.cancelled[id] = true; }
+        if (done) done();
+      });
+    });
+  });
+};
+PDService.noteCancelled = function(coinid) {
+  if (!coinid) return;
+  PDService.cancelled[coinid] = true;
+  MDS.sql("INSERT INTO `cancelled_coins` (`coinid`,`ts`) VALUES ('" + PDService.escSql(coinid) + "'," + Date.now() + ")", function() {});
+};
+PDService.notifyLog = function(message) { try { if (MDS.log) MDS.log("[PandaDEX] " + message); } catch (ignore) {} };
 PDService.recordFill = function() {
   var m = PDService.fillMeta;
   if (!m) return;
   PDService.fillMeta = null;
   PandaTape.addMyTrade({spentcoin:m.spentcoin, timems:Date.now(), block:PDService.block, price:m.price,
-    size:m.size, buy:m.buy, maker:false, orderid:""}, function(added) {
+    size:m.size, buy:m.buy, maker:false, orderid:"", txpowid:m.txpowid || "", sourceKind:m.sourceKind || "BOOK",
+    sourceCoinids:(m.sourceCoinids || []).join(" "), verificationStatus:"LOCAL_VERIFIED",
+    verificationNote:"Source coins spent and expected proceeds observed", verifiedBlock:PDService.block}, function(added) {
       if (added) PDService.notify("Trade complete: " + (m.buy ? "Bought " : "Sold ") + PandaDEX.plain(m.size) + " MINIMA @ " + PandaDEX.plain(m.price) + " mxUSDT. Funds are confirming.");
       PDService.loadTape(function() { PDService.snapshot(); });
     });
@@ -346,6 +393,8 @@ PDService.makerRun = function(actions, idx, mid, posted, chainBlock) {
     });
   }
   if (a.kind === PandaMaker.K_CANCEL) {
+    PDService.noteCancelled(a.order.coinid);
+    PDService.noteCancelled(a.order.coinid);
     return PandaTxn.cancel(PDService.cmd, a.order, function(error, tx) {
       if (error) { PDService.makerSetStage("Maker: CANCEL failed — " + error); return PDService.makerRun(actions, idx + 1, mid, posted, chainBlock); }
       PDService.makerForgetByOrderId(a.order.orderId); PDService.makerTombstone(a.order.orderId, chainBlock, chainBlock);
@@ -421,6 +470,7 @@ PDService.makerSweepTombstones = function() {
   if (!target) return;
   PDService.makerTombstone(target.orderId, PDService.block, PDService.block);
   PDService.maker.working = true; PDService.makerSetStage("Maker: cancelling a late order");
+  PDService.noteCancelled(target.coinid);
   PandaTxn.cancel(PDService.cmd, target, function(error, tx) {
     PDService.maker.working = false;
     if (!error) {
@@ -440,6 +490,7 @@ PDService.hasMakerSlots = function() {
 PDService.makerCancelChunks = function(live, idx) {
   var chunk = live.slice(idx, idx + PandaDEX.MAX_ORDERS);
   if (!chunk.length) { PDService.maker.working = false; PDService.setStage("Maker withdraw submitted — orders leave as blocks confirm"); return PDService.refresh(); }
+  for (var ci = 0; ci < chunk.length; ci++) PDService.noteCancelled(chunk[ci].coinid);
   PandaTxn.cancelBatch(PDService.cmd, chunk, function(error, tx) {
     var i;
     if (error) { for (i = 0; i < chunk.length; i++) PDService.makerTombstone(chunk[i].orderId, PDService.block, 0); PDService.tell("ERROR", {message:error}); }
@@ -478,6 +529,7 @@ PDService.cancelAllRun = function(list, idx, ok, failed) {
   chunk = list.slice(idx, idx + PandaDEX.MAX_ORDERS);
   PDService.setBusy(true);
   PDService.setStage("Cancelling " + Math.min(idx + chunk.length, list.length) + " of " + list.length + "…");
+  for (var ci = 0; ci < chunk.length; ci++) PDService.noteCancelled(chunk[ci].coinid);
   PandaTxn.cancelBatch(PDService.cmd, chunk, function(error, tx) {
     if (error) {
       PDService.tell("ERROR", {message:"Cancel batch failed — " + error});
@@ -541,6 +593,7 @@ PDService.processorRun = function(actions, idx) {
       PDService.processorRun(actions, idx + 1);
     });
   }
+  PDService.noteCancelled(a.order.coinid);
   return PandaTxn.collectExpired(PDService.cmd, a.order, function(error) {
     if (error) PDService.processorClear(a.order.coinid);
     else {
@@ -573,9 +626,13 @@ PDService.restReady = function(book) {
     coinid = PDService.restQueueCoins[i];
     if (PDService.sourceStillLive(book, coinid)) {
       if (PDService.restQueueBlock > 0 && PDService.block - PDService.restQueueBlock > PDService.SWEEP_DEADLINE_BLOCKS) {
+        /* The trade itself may well have landed — it is the REMAINDER that timed out. Record it
+           before clearing, otherwise a posted, confirmed trade is erased and the user is told it
+           never happened. */
+        PDService.recordFill();
         PDService.restQueue = null; PDService.restQueueCoins = null; PDService.restQueueBlock = 0;
         PDService.fillCoins = null; PDService.fillBlock = 0; PDService.filling = {}; PDService.fillMeta = null;
-        PDService.setStage("That trade never confirmed — your resting limit order was NOT placed. Nothing was spent; try again.");
+        PDService.setStage("Your resting limit order was NOT placed — the trade did not confirm in time. Check ORDERS and your balance.");
       }
       return false;
     }
@@ -713,6 +770,9 @@ PDService.boot = function() {
         PDService.identity = {address:addressResult.response.address, publickey:addressResult.response.publickey, miniaddress:addressResult.response.miniaddress};
         PDService.loadKeys(function() {
         PandaTape.init(function() {
+          /* Load the persisted cancel log alongside boot — it only has to be present before the
+             first fill adjudication, which is a refresh away. No extra nesting. */
+          PDService.cancelInit(function() {});
           PDService.diff = PandaTape.newDiff({consume:function(coinid){ return !!PDService.cancelled[coinid]; }});
           PDService.processorInit(function() {
             PDService.pendingInit(function() {
@@ -730,7 +790,19 @@ PDService.boot = function() {
     });
   });
 };
+/* Any throw inside a node callback propagates into Java and disappears — the chain stops, `busy`
+   stays set and the banner freezes with no error. That is precisely how a trade "stalls". Every
+   user action is wrapped so a defect reports itself instead of hanging the app. */
 PDService.action = function(message) {
+  try { PDService.actionInner(message); }
+  catch (error) {
+    PDService.notifyLog("action failed: " + error);
+    PDService.setBusy(false);
+    PDService.setStage("That action could not be completed — " + (error && error.message ? error.message : error));
+    PDService.tell("ERROR", {message:"That action could not be completed — " + (error && error.message ? error.message : error) + " (nothing was sent)"});
+  }
+};
+PDService.actionInner = function(message) {
   var i, order = null, plan, comp, rest, data, amountD, priceD, limitD, minRemD;
   if (message.type === "REFRESH") { if (!PDService.ready) { PDService.snapshot(); return; } return PDService.refresh(); }
   if (!PDService.ready) { PDService.setStage("PandaDEX is still starting…"); return; }
@@ -761,10 +833,30 @@ PDService.action = function(message) {
     if (!priceD || !priceD.gt(0)) return PDService.tell("ERROR", {message:"Enter a valid price"});
     amountD = PandaDEX.down(amountD, PandaDEX.DP); minRemD = Decimal.max(PandaDEX.d(0), PandaDEX.down(minRemD, PandaDEX.DP));
     data.minima = PandaDEX.plain(amountD); data.price = PandaDEX.plain(priceD); data.minRem = PandaDEX.plain(minRemD);
-    /* Blended route first: the composite router compares the next slice of resting book against
-       the next slice of pool curve and takes whichever is cheaper at the margin. It falls through
-       to the book-only planner whenever no pool contributes, so the order-book path is unchanged
-       when there are no pools — which is also what happens if the sentinel scan came back empty. */
+    /* Re-read the pools before planning. PDService.pools is up to a block old and refreshPools
+       keeps the previous snapshot when a scan fails, so a reserve coin somebody else already spent
+       stays in our plan — the transaction then names a spent input and is rejected with
+       mmrproofs:false, which is exactly the kind of failure that reported nothing useful. Costs a
+       few node calls on a user action only. */
+    PDService.setStage("Checking pool liquidity\u2026");
+    return PDService.refreshPools(function() { PDService.limitWithPools(data); });
+  }
+  return PDService.actionRest(message);
+};
+PDService.limitWithPools = function(data) {
+  try { PDService.limitWithPoolsInner(data); }
+  catch (error) {
+    PDService.notifyLog("limit planning failed: " + error);
+    PDService.setBusy(false);
+    PDService.setStage("Could not plan the trade — " + (error && error.message ? error.message : error));
+    PDService.tell("ERROR", {message:"Could not plan the trade — " + (error && error.message ? error.message : error) + " (nothing was sent)"});
+  }
+};
+PDService.limitWithPoolsInner = function(data) {
+  /* data.minima was already validated and normalised by the LIMIT handler before the pool refresh;
+     re-derive it here because this no longer shares a scope with it. */
+  var i, plan, comp, rest, amountD = PandaDEX.d(data.minima);
+  {
     comp = PandaComposite.plan(PDService.book, PDService.pools, !!data.buy, data.minima, data.price || null, PDService.block);
     if (!PandaComposite.isEmpty(comp) && PandaComposite.poolCount(comp) > 0) {
       PDService.filling = {};
@@ -785,7 +877,10 @@ PDService.action = function(message) {
         }
         PDService.fillCoins = comp.sourceCoinIds.slice();
         PDService.fillBlock = PDService.block;
-        PDService.fillMeta = {spentcoin:comp.sourceCoinIds[0], price:PandaDEX.plain(comp.effectivePrice), size:PandaDEX.plain(comp.totalMinima), buy:!!data.buy};
+        PDService.fillMeta = {spentcoin:comp.sourceCoinIds[0], price:PandaDEX.plain(comp.effectivePrice),
+          size:PandaDEX.plain(comp.totalMinima), buy:!!data.buy, txpowid:tx || "",
+          sourceKind:(PandaComposite.poolCount(comp) > 0 && comp.orderTakes.length) ? "BOOK+POOL" : (PandaComposite.poolCount(comp) > 0 ? "POOL" : "BOOK"),
+          sourceCoinids:comp.sourceCoinIds.slice()};
         PDService.refresh();
       });
     }
@@ -818,16 +913,22 @@ PDService.action = function(message) {
       PDService.fillCoins = [];
       for (i = 0; i < plan.takes.length; i++) PDService.fillCoins.push(plan.takes[i].order.coinid);
       PDService.fillBlock = PDService.block;
-      PDService.fillMeta = {spentcoin:plan.takes[0].order.coinid, price:PandaDEX.plain(plan.average), size:PandaDEX.plain(plan.totalMinima), buy:!!data.buy};
+      PDService.fillMeta = {spentcoin:plan.takes[0].order.coinid, price:PandaDEX.plain(plan.average),
+        size:PandaDEX.plain(plan.totalMinima), buy:!!data.buy, txpowid:tx || "", sourceKind:"BOOK",
+        sourceCoinids:PDService.fillCoins.slice()};
       PDService.refresh();
     });
   }
+};
+PDService.actionRest = function(message) {
+  var i, order = null, data, amountD;
   if (message.type === "CANCEL") {
     data = message.data || {};
     for (i = 0; i < PDService.book.length; i++) if (PDService.book[i].coinid === data.coinid) order = PDService.book[i];
     if (!PDService.owns(order)) return PDService.tell("ERROR", {message:"That is not one of your active orders"});
     if (PDService.pendingRefs[order.coinid] === "cancel") return PDService.tell("ERROR", {message:"That cancellation is already waiting for confirmation"});
     PDService.setBusy(true); PDService.setStage("Submitting cancellation…");
+    PDService.noteCancelled(order.coinid);
     return PandaTxn.cancel(PDService.cmd, order, function(error, tx) {
       var wasMaker = PDService.makerOwnedIds()[order.orderId];
       PDService.setBusy(false);

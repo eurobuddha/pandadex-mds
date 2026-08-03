@@ -91,7 +91,7 @@ var PandaTape = PandaTape || {};
       /* Every tape, candle and 24h-stats read orders by timems over up to 8000 rows. */
       MDS.sql("CREATE INDEX IF NOT EXISTS `tape_time` ON `market_tape`(`timems`)", function () {
       MDS.sql("CREATE TABLE IF NOT EXISTS `my_trades` (`spentcoin` varchar(160) PRIMARY KEY, `timems` bigint, `block` bigint, `price` varchar(80), `size` varchar(80), `buy` int, `maker` int, `orderid` varchar(160))", function () {
-        T.migrateEvidence(done);
+        T.migrateEvidence(function () { T.ensureSchema(done); });
       });
       });
     });
@@ -100,6 +100,28 @@ var PandaTape = PandaTape || {};
      is genuinely absent: a bare ALTER on every launch is noise at best, and on a restricted node
      each unnecessary statement is another approval prompt. Each column is independent, so a
      failure on one does not abandon the rest. */
+  /* One-time purge. Every release up to 0.3.4 recorded an unverifiable disappearance as a fill, and
+     0.3.5 fixed the source but could not undo what was already written — those rows are still in the
+     database, still feeding the tape, the candles, the 24h stats, the P&L and the export. There was
+     no schema version at all, so there was no way to express "this data is wrong, drop it". Native
+     hit the identical problem and solved it the identical way (DexDb v<3). The data is locally
+     derived and rebuilds itself from the chain. */
+  T.SCHEMA_VERSION = 2;
+  T.ensureSchema = function (done) {
+    MDS.sql("CREATE TABLE IF NOT EXISTS `dex_schema` (`k` varchar(32) primary key, `v` int)", function () {
+      MDS.sql("SELECT `v` FROM `dex_schema` WHERE `k`='tape'", function (res) {
+        var rows = (res && res.rows) || [], have = rows.length ? Number(rows[0].V || rows[0].v || 0) : 0;
+        if (have >= T.SCHEMA_VERSION) { if (done) done(); return; }
+        MDS.sql("DELETE FROM `market_tape`", function () {
+          MDS.sql("DELETE FROM `my_trades`", function () {
+            MDS.sql("DELETE FROM `dex_schema` WHERE `k`='tape'", function () {
+              MDS.sql("INSERT INTO `dex_schema` (`k`,`v`) VALUES ('tape'," + T.SCHEMA_VERSION + ")", function () { if (done) done(); });
+            });
+          });
+        });
+      });
+    });
+  };
   T.EVIDENCE_COLUMNS = [
     ["txpowid", "varchar(160)"], ["source_kind", "varchar(16)"], ["source_coinids", "text"],
     ["proceeds_coinid", "varchar(160)"], ["verification_status", "varchar(32)"],
@@ -127,7 +149,24 @@ var PandaTape = PandaTape || {};
     });
   };
   T.addFill = function (row, done) { T.insertOnce("market_tape", row, done); };
-  T.addMyTrade = function (row, done) { T.insertOnce("my_trades", row, done); };
+  /* my_trades carries evidence the market tape does not: which transaction moved it, whether the
+     liquidity came from the book, a pool, or both, and how we know it happened. Written here so a
+     row can render exactly what native shows — TAKER  POOL  LOCAL_VERIFIED  <txpowid>. */
+  T.addMyTrade = function (row, done) {
+    MDS.sql("SELECT `spentcoin` FROM `my_trades` WHERE `spentcoin`='" + T.esc(row.spentcoin) + "'", function (found) {
+      if (found && found.status && found.rows && found.rows.length) { if (done) done(false); return; }
+      MDS.sql("INSERT INTO `my_trades` (`spentcoin`,`timems`,`block`,`price`,`size`,`buy`,`maker`,`orderid`,`txpowid`,`source_kind`,`source_coinids`,`verification_status`,`verification_note`,`verified_block`) VALUES ('" +
+        T.esc(row.spentcoin) + "'," + Number(row.timems || Date.now()) + "," + Number(row.block || 0) + ",'" +
+        T.esc(P.plain(row.price)) + "','" + T.esc(P.plain(row.size)) + "'," + (row.buy ? 1 : 0) + "," +
+        (row.maker ? 1 : 0) + ",'" + T.esc(row.orderid || "") + "','" + T.esc(row.txpowid || "") + "','" +
+        T.esc(row.sourceKind || "") + "','" + T.esc(row.sourceCoinids || "") + "','" +
+        T.esc(row.verificationStatus || "LOCAL_VERIFIED") + "','" + T.esc(row.verificationNote || "") + "'," +
+        Number(row.verifiedBlock || row.block || 0) + ")", function (res) {
+          MDS.sql("DELETE FROM `my_trades` WHERE `spentcoin` NOT IN (SELECT `spentcoin` FROM `my_trades` ORDER BY `timems` DESC LIMIT 8000)", function () {});
+          if (done) done(!!(res && res.status));
+        });
+    });
+  };
   T.tapeRows = function (limit, done) {
     MDS.sql("SELECT `timems`,`price`,`size`,`buy`,`mine` FROM `market_tape` ORDER BY `timems` DESC LIMIT " + Number(limit || 120), function (res) {
       var out = [], rows = res && res.rows || [], i, r;
