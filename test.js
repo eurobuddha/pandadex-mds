@@ -64,6 +64,61 @@ var pool={address:"0xpool",opk:"0xpk",oadr:"0xowner",tok:PandaDEX.USDT,kmin:"0",
 var q=PandaCurve.quoteTForMOut(pool,"10");assert(q.ok&&q.outAmount.gte("10")&&q.inAmount.gt(0));
 var route=PandaPoolRouter.routeExactMinimaOut([pool],"10");assert(route.ok&&route.poolsUsed===1&&route.totalOut.gte("10"));
 var synthetic=PandaSynthetic.sample([pool],true,"0.001",3);assert(synthetic.length>0&&PandaDEX.d(synthetic[0].poolMinima).gt(0));
+
+/* ---- synthetic depth (native SyntheticDepthTest) ----
+   A depth band answers "how much can I take before the NEXT slice costs more than this price?".
+   Solving that on the AVERAGE cost instead of the MARGINAL cost overstates the answer by a factor
+   approaching two on a constant-product curve — taking Q from reserves (x,y) moves the marginal
+   price by ~2Q/x but the average by only ~Q/x. That is precisely the bug this pins: the ladder
+   advertised twice the liquidity it could deliver at the price shown beside it. */
+var dPool={address:"0xdp",opk:"0xpk",oadr:"0xo",tok:PandaDEX.USDT,kmin:"0",reserveM:"100000",reserveT:"500",coinidM:"0xdm",coinidT:"0xdt",tokDecimals:8,covenantScript:"S"};
+var dPx=PandaCurve.aggregatePrice([dPool]), dCap=PandaCurve.totalMinima([dPool]).mul("0.5");
+function solveAvg(boundary){ var lo=PandaDEX.d(0), hi=dCap, i, mid, r, eff, cmp;
+  for(i=0;i<40;i++){ mid=lo.add(hi).div(2).toDecimalPlaces(8,Decimal.ROUND_HALF_UP);
+    r=PandaPoolRouter.routeExactMinimaOut([dPool],mid);
+    if(!r||!r.ok){hi=mid;continue;}
+    eff=r.totalIn.div(r.totalOut).toDecimalPlaces(12,Decimal.ROUND_HALF_UP); cmp=eff.cmp(boundary);
+    if(cmp<=0) lo=mid; else hi=mid; }
+  return lo; }
+function solveMarg(boundary){ var lo=PandaDEX.d(0), hi=dCap, i, mid, m, cmp;
+  for(i=0;i<40;i++){ mid=lo.add(hi).div(2).toDecimalPlaces(8,Decimal.ROUND_HALF_UP);
+    m=PandaSynthetic.marginalPrice([dPool],true,mid);
+    if(!m){hi=mid;continue;} cmp=m.cmp(boundary);
+    if(cmp<=0) lo=mid; else hi=mid; }
+  return lo; }
+var nearBoundary=dPx.add("0.0002"), avgQty=solveAvg(nearBoundary), margQty=solveMarg(nearBoundary);
+assert(margQty.gt(0)&&avgQty.gt(margQty));
+var overstatement=avgQty.div(margQty);
+assert(overstatement.gt("1.9")&&overstatement.lt("2.1"));   /* the doubling, measured */
+/* The marginal price at the solved quantity really is at the boundary, and past it, over. */
+assert(PandaSynthetic.marginalPrice([dPool],true,margQty).lte(nearBoundary));
+assert(PandaSynthetic.marginalPrice([dPool],true,margQty.mul(2)).gt(nearBoundary));
+
+/* Displayed prices sit exactly on the tick grid — asks ceiled, bids floored, so a level never
+   flatters its own side. Without this, pool rows never merge with the book's grouped levels. */
+assert(PandaSynthetic.bucketPrice("0.0050051",true,"0.0001").eq("0.0051"));
+assert(PandaSynthetic.bucketPrice("0.0050051",false,"0.0001").eq("0.005"));
+var dSmall={address:"0xds",opk:"0xpk",oadr:"0xo",tok:PandaDEX.USDT,kmin:"0",reserveM:"2000",reserveT:"10",coinidM:"0xsm",coinidT:"0xst",tokDecimals:8,covenantScript:"S"};
+var sCap=PandaCurve.totalMinima([dSmall]).mul("0.5");
+[["0.0001",true],["0.0001",false],["0.001",true],["0.001",false]].forEach(function(cfg){
+  var tickD=PandaDEX.d(cfg[0]), rows=PandaSynthetic.sample([dSmall],cfg[1],cfg[0],6), cum=PandaDEX.d(0), prevPrice=null, j, r;
+  assert(rows.length>0);
+  for(j=0;j<rows.length;j++){ r=rows[j];
+    assert(r.poolMinima.gt(0));                                  /* bands are incremental, never zero or negative */
+    assert(r.price.div(tickD).mod(1).eq(0));                     /* exactly on the grid */
+    assert(r.price.gt(0));                                       /* a bid band never crosses zero */
+    if(prevPrice) assert(cfg[1]?r.price.gt(prevPrice):r.price.lt(prevPrice));  /* monotonic away from mid */
+    prevPrice=r.price; cum=cum.add(r.poolMinima); }
+  assert(cum.lte(sCap));                                         /* never advertises more than half the reserves */
+  /* Every displayed band must actually be fillable at the price shown next to it. */
+  var running=PandaDEX.d(0);
+  for(j=0;j<rows.length;j++){ running=running.add(rows[j].poolMinima);
+    assert(PandaDEX.d(PandaComposite.plan([],[dSmall],cfg[1],running,rows[j].price,0).totalMinima).gte(running)); }
+});
+/* A pool with no liquidity, no rows requested, or a nonsense tick yields nothing rather than throwing. */
+assert.deepStrictEqual(PandaSynthetic.sample([],true,"0.001",6),[]);
+assert.deepStrictEqual(PandaSynthetic.sample([dSmall],true,"0.001",0),[]);
+assert.deepStrictEqual(PandaSynthetic.sample([dSmall],true,"0",6),[]);
 var cheapAsk=cloneOrder(C,"0xask","5",100);cheapAsk.price=PandaDEX.d("0.005");cheapAsk.usdt=PandaDEX.d("0.025");cheapAsk.wantAmt=PandaDEX.d("0.025");cheapAsk.orderId="ask1";
 var combo=PandaComposite.plan([cheapAsk],[pool],true,"20","0.02",200);
 assert(!PandaComposite.isEmpty(combo));assert(PandaComposite.poolCount(combo)>0);assert(PandaDEX.d(combo.totalMinima).gt(0));assert(combo.sourceCoinIds.indexOf("0xpm")>=0&&combo.sourceCoinIds.indexOf("0xpt")>=0);

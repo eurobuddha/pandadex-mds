@@ -222,32 +222,127 @@ var PandaSynthetic = {};
     if (pools.length > Router.MAX_POOLS) { pools.sort(function(a,b){ return P.d(b.reserveM).cmp(a.reserveM); }); pools = pools.slice(0, Router.MAX_POOLS); }
     return Curve.totalMinima(pools);
   };
+  /* ---- synthetic depth: pool liquidity rendered as order-book bands ----
+     Port of native SyntheticDepth.java. Two rules here are easy to get wrong and both were:
+
+     1. A band boundary is a MARGINAL price, not an average one. The question a depth row answers
+        is "how much can I take before the NEXT slice costs more than this price?" — not "how much
+        can I take before my AVERAGE cost exceeds it?". On a constant-product curve those differ by
+        a factor of two: taking Q out of reserves (x,y) moves the marginal price by ~2Q/x but the
+        average price by only ~Q/x, so solving on the average admits twice the quantity for the
+        same displayed price. That is not a rounding difference, it is a doubled depth ladder.
+     2. A displayed row must be executable AT the price displayed beside it. Solving the curve says
+        what the maths allows; it does not account for the router's own slicing and rounding. Every
+        band is therefore re-planned through the real router at its own limit price and shaved back
+        until the plan actually fills it. */
+  Synthetic.DEFAULT_TICK = "0.00001";
+  Synthetic.DISPLAY_DEPTH_CUT = "0.00001";
+  Synthetic.SOLVE_ITERATIONS = 8;
+  Synthetic.CAP_ITERATIONS = 8;
+  Synthetic.ROUTER_SLICES = 128;
+
   Synthetic.sample = function(pools, askSide, tick, rows) {
-    var out = [], pair = [], i, p, px, stepTick, cap, prev = P.d(0), boundary, cum, band;
+    var out = [], pair = [], i, p, px, quantum, cap, prev = P.d(0), boundary, bucket, cum, band;
     pools = pools || [];
     for (i = 0; i < pools.length; i++) { p = Pool.clean(pools[i]); if (Pool.funded(p) && P.eqTok(p.tok, P.USDT)) pair.push(p); }
     if (!pair.length || rows <= 0) return out;
     px = Curve.aggregatePrice(pair); if (!px.gt(0)) return out;
-    stepTick = tick ? P.d(tick) : P.d("0.000001"); cap = Curve.totalMinima(pair).mul("0.5");
+    cap = Curve.totalMinima(pair).mul("0.5"); if (!cap.gt(0)) return out;
+    quantum = tick ? P.d(tick) : P.d(Synthetic.DEFAULT_TICK);
+    if (!quantum.gt(0)) return out;
     for (i = 1; i <= rows; i++) {
-      boundary = askSide ? px.add(stepTick.mul(i)) : px.sub(stepTick.mul(i));
-      if (!boundary.gt(0)) break;
-      cum = Synthetic.solveToBoundary(pair, askSide, boundary, cap); band = cum.sub(prev);
-      if (band.gt(0)) out.push({price:boundary, poolMinima:band});
-      prev = cum; if (prev.gte(cap)) break;
+      boundary = askSide ? px.add(quantum.mul(i)) : px.sub(quantum.mul(i));
+      bucket = Synthetic.bucketPrice(boundary, askSide, quantum);
+      if (!bucket.gt(0)) break;
+      cum = Synthetic.solveToBoundary(pair, askSide, boundary, cap);
+      cum = Synthetic.capToExecutable(pair, askSide, cum, bucket);
+      band = cum.sub(prev);
+      if (!band.gt(0)) continue;
+      out.push({price:bucket, poolMinima:band});
+      prev = cum;
+      if (prev.gte(cap)) break;
     }
-    return out;
+    return Synthetic.enforceExecutable(pair, askSide, out);
   };
+
+  /* Snap a band's displayed price onto the tick grid the book itself groups by — asks up, bids
+     down, so a level never flatters its own side. Without this the pool rows key on raw curve
+     prices and never merge with the book's levels. */
+  Synthetic.bucketPrice = function(price, askSide, tick) {
+    var p = P.d(price === undefined || price === null ? 0 : price), t = P.d(tick), q;
+    if (!p.gt(0) || !t.gt(0)) return P.d(0);
+    q = askSide ? p.div(t).ceil() : p.div(t).floor();
+    return q.mul(t);
+  };
+
+  /* The price of the NEXT slice at this cumulative size, obtained by differencing a route at
+     `amount` against one an epsilon smaller — exactly how the composite router picks between a
+     pool and an order. */
+  Synthetic.marginalPrice = function(pools, askSide, amount) {
+    var amt = P.d(amount), epsilon, beforeAmt, before, after, prevM, prevT, curM, curT, dm, dt;
+    if (!amt.gt(0)) return null;
+    epsilon = amt.div(Synthetic.ROUTER_SLICES).toDecimalPlaces(P.DP, Decimal.ROUND_CEIL);
+    if (!epsilon.gt(0)) return null;
+    beforeAmt = amt.sub(epsilon); if (beforeAmt.lt(0)) beforeAmt = P.d(0);
+    before = beforeAmt.gt(0) ? (askSide ? Router.routeExactMinimaOut(pools, beforeAmt) : Router.route(pools, true, beforeAmt)) : null;
+    after = askSide ? Router.routeExactMinimaOut(pools, amt) : Router.route(pools, true, amt);
+    if (!after || !after.ok) return null;
+    prevM = before && before.ok ? (askSide ? before.totalOut : before.totalIn) : P.d(0);
+    prevT = before && before.ok ? (askSide ? before.totalIn : before.totalOut) : P.d(0);
+    curM = askSide ? after.totalOut : after.totalIn;
+    curT = askSide ? after.totalIn : after.totalOut;
+    dm = P.d(curM).sub(prevM); dt = P.d(curT).sub(prevT);
+    if (!dm.gt(0) || !dt.gt(0)) return null;
+    return dt.div(dm).toDecimalPlaces(P.PRICE_DP, Decimal.ROUND_HALF_UP);
+  };
+
   Synthetic.solveToBoundary = function(pools, askSide, boundary, cap) {
-    var lo = P.d(0), hi = P.d(cap), i, mid, r, eff, cmp;
-    for (i = 0; i < 40; i++) {
+    var lo = P.d(0), hi = P.d(cap), i, mid, marginal, cmp;
+    for (i = 0; i < Synthetic.SOLVE_ITERATIONS; i++) {
       mid = lo.add(hi).div(2).toDecimalPlaces(P.DP, Decimal.ROUND_HALF_UP);
-      r = askSide ? Router.routeExactMinimaOut(pools, mid) : Router.route(pools, true, mid);
-      if (!r || !r.ok) { hi = mid; continue; }
-      eff = askSide ? r.totalIn.div(r.totalOut).toDecimalPlaces(P.PRICE_DP, Decimal.ROUND_HALF_UP) : r.totalOut.div(r.totalIn).toDecimalPlaces(P.PRICE_DP, Decimal.ROUND_HALF_UP);
-      cmp = eff.cmp(boundary);
+      marginal = Synthetic.marginalPrice(pools, askSide, mid);
+      if (!marginal) { hi = mid; continue; }
+      cmp = marginal.cmp(boundary);
       if (askSide ? cmp <= 0 : cmp >= 0) lo = mid; else hi = mid;
     }
     return lo;
+  };
+
+  Synthetic.capToExecutable = function(pools, askSide, amount, limitPrice) {
+    var amt = P.d(amount);
+    if (!amt.gt(0)) return amt;
+    return Synthetic.conservativeExecutable(pools, askSide, amt, limitPrice);
+  };
+
+  /* Shave until the real router can actually fill it at this limit. PandaComposite is resolved at
+     call time on purpose: composite.js loads after this file. */
+  Synthetic.conservativeExecutable = function(pools, askSide, amount, limitPrice) {
+    var cut = P.d(Synthetic.DISPLAY_DEPTH_CUT), candidate = P.d(amount).sub(cut), i, plan, filled;
+    if (candidate.lt(0)) candidate = P.d(0);
+    if (typeof PandaComposite === "undefined" || !PandaComposite.plan) return candidate;
+    for (i = 0; i < Synthetic.CAP_ITERATIONS && candidate.gt(0); i++) {
+      plan = PandaComposite.plan([], pools, askSide, candidate, limitPrice, 0);
+      filled = P.d(plan && plan.totalMinima || 0);
+      if (filled.gte(candidate)) return candidate;
+      candidate = (filled.lt(candidate) ? filled : candidate).sub(cut);
+      if (candidate.lt(0)) candidate = P.d(0);
+    }
+    return P.d(0);
+  };
+
+  /* A row is only honest if the CUMULATIVE depth above it is fillable at its price, so the check
+     runs on the running total and re-derives each band from what survived. */
+  Synthetic.enforceExecutable = function(pools, askSide, rows) {
+    var safe = [], displayed = P.d(0), safeDisplayed = P.d(0), i, row, capped, band;
+    for (i = 0; i < (rows || []).length; i++) {
+      row = rows[i];
+      displayed = displayed.add(row.poolMinima);
+      capped = Synthetic.conservativeExecutable(pools, askSide, displayed, row.price);
+      band = capped.sub(safeDisplayed);
+      if (!band.gt(0)) continue;
+      safe.push({price:row.price, poolMinima:band});
+      safeDisplayed = capped;
+    }
+    return safe;
   };
 })(PandaPool, PandaCurve, PandaPoolRouter, PandaSynthetic, PandaDEX);
