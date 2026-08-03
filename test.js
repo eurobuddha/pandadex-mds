@@ -427,4 +427,77 @@ PandaBook.scan(function(c,cb){scanQueries.push(c);cb({status:true,response:[]});
 assert(scanQueries.length>1);
 assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+PandaDEX.SCAN_DEPTH)>0;}));  /* full window first */
 assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.floor(PandaDEX.SCAN_DEPTH/2))>0;}));  /* then halved */
+/* ---- THE RHINO SCOPE HARNESS ----
+   The MDS service is Rhino: ServiceJSRunner builds the scope with ctx.initStandardObjects() and
+   injects only `MDS`. No setTimeout, no setInterval, no XMLHttpRequest, no window, no document.
+   signlock.js called setInterval, which threw before the work function ever ran — and because
+   MDSJS.sql invokes JS callbacks with no try/catch the error vanished and the UI never changed.
+   The app could not sign or post ANYTHING from 0.2.33 to 0.3.7 and nothing caught it, because
+   every test until now ran under Node, where the timers exist.
+   This loads every service module in a faithful model of that scope and proves signing works. */
+(function () {
+  var vmmod = require("vm"), fsmod = require("fs");
+  var sqlLog = [];
+  var sandbox = {
+    /* exactly what Rhino's initStandardObjects() provides, and nothing else */
+    Object: Object, Array: Array, Function: Function, String: String, Number: Number,
+    Boolean: Boolean, Date: Date, Math: Math, JSON: JSON, RegExp: RegExp, Error: Error,
+    TypeError: TypeError, RangeError: RangeError,
+    isNaN: isNaN, isFinite: isFinite, parseInt: parseInt, parseFloat: parseFloat,
+    MDS: {
+      sql: function (q, cb) { sqlLog.push(q); if (cb) cb({ status: true, rows: [] }); },
+      cmd: function (c, cb) { if (cb) cb({ status: true, response: {} }); },
+      log: function () {}, notify: function () {},
+      net: { GET: function (u, cb) { if (cb) cb({ status: false }); } },
+      comms: { solo: function (m, cb) { if (cb) cb(); } }
+    }
+  };
+  vmmod.createContext(sandbox);
+  /* Exactly the list service.js loads, in the same order. */
+  ["decimal.js","covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
+   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js"].forEach(function (f) {
+    try { vmmod.runInContext(fsmod.readFileSync(f, "utf8"), sandbox, { filename: f }); }
+    catch (error) { throw new Error(f + " cannot load in the MDS service scope: " + error); }
+  });
+  /* decimal.js is a UMD bundle; the service gets Decimal from its own global. */
+  vmmod.runInContext("if (typeof Decimal === 'undefined' && typeof module !== 'undefined') { }", sandbox);
+  /* The gate must actually run its work and release, with the SQL layer live. */
+  var result = vmmod.runInContext(
+    "PandaSignLock.use(MDS.sql);" +
+    "var ran = 0, err = null;" +
+    "try { PandaSignLock.gate('dex', function (rel) { ran++; rel.free(); }); }" +
+    "catch (e) { err = String(e); }" +
+    "JSON.stringify({ ran: ran, err: err, busy: PandaSignLock.busy(), queued: PandaSignLock.queued() });",
+    sandbox);
+  var parsed = JSON.parse(result);
+  assert.strictEqual(parsed.err, null, "signing threw in the MDS service scope: " + parsed.err);
+  assert.strictEqual(parsed.ran, 1, "the signing work function never ran in the MDS service scope");
+  assert.strictEqual(parsed.busy, false, "the signing gate was not released");
+  assert.strictEqual(parsed.queued, 0);
+  assert(sqlLog.some(function (q) { return q.indexOf("INSERT INTO `sign_lock`") === 0; }));
+  assert(sqlLog.some(function (q) { return q.indexOf("DELETE FROM `sign_lock` WHERE `id`=1") === 0; }));
+  /* Two operations still serialise, and the second only runs when the first releases. */
+  var serial = vmmod.runInContext(
+    "PandaSignLock.reset();" +
+    "var order = [], rels = [];" +
+    "PandaSignLock.gate('a', function (r) { order.push('a'); rels.push(r); });" +
+    "PandaSignLock.gate('b', function (r) { order.push('b'); rels.push(r); });" +
+    "var mid = order.join(',');" +
+    "rels[0].free();" +
+    "JSON.stringify({ mid: mid, end: order.join(','), busy: PandaSignLock.busy() });",
+    sandbox);
+  var s2 = JSON.parse(serial);
+  assert.strictEqual(s2.mid, "a", "two signing operations ran concurrently");
+  assert.strictEqual(s2.end, "a,b");
+  /* And no service module may reference a browser global at all. */
+  ["signlock.js","price.js","txn.js","service.js","tape.js","pool.js","composite.js","book.js",
+   "covenant.js","maker.js","verifier.js","pending.js","stats.js","split.js"].forEach(function (f) {
+    /* Strip comments first — this file's own header names the globals it must not use. */
+    var src = fsmod.readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+    [/\bsetTimeout\s*\(/, /\bsetInterval\s*\(/, /\bXMLHttpRequest\b/, /\bwindow\./, /\bdocument\./,
+     /\blocalStorage\b/, /\bnavigator\b/].forEach(function (bad) {
+      assert(!bad.test(src), f + " uses a browser global the MDS service does not have: " + bad);
+    });
+  });
+})();
 console.log("PandaDEX pure tests passed");

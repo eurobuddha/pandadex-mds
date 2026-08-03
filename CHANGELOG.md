@@ -3,6 +3,56 @@
 Newest first. Each entry names the native PandaDEX version it reaches parity with, and the specific
 on-chain failure it prevents.
 
+## [0.3.7] — the app could not sign or post anything, and had not been able to since 0.2.33
+
+**Fixed — every fund-moving action was impossible.** `signlock.js`, the serial signing gate added in
+0.2.33, called `setInterval` to start its heartbeat. The MDS service is Rhino: `ServiceJSRunner`
+builds the scope with `ctx.initStandardObjects()` and injects only `MDS`. There is no `setTimeout`,
+no `setInterval`, no `XMLHttpRequest`. Run in exactly that scope the module gives:
+
+```
+{"workRan":false,"threw":"ReferenceError: setInterval is not defined","busyStuck":true}
+```
+
+The throw lands on the line *before* the local `try`, so the work function never ran, the gate never
+released, and every later signing operation queued behind it forever. `MDSJS.sql` invokes JS
+callbacks with no `try`/`catch`, so the error vanished upward and the UI simply never changed.
+
+Affected: place, cancel, cancel-all, edit, GTC renewal, expiry sweep, book sweep, composite fill,
+maker rungs, funding split — everything. No funds moved and nothing was left stuck on chain; the
+transactions were never built. Every test until now ran under Node, where the timers exist.
+
+The gate is now **timer-free**. `Date.now()` is all the service has, so the heartbeat, the
+lost-callback watchdog and contended-claim retries all ride a new `PandaSignLock.tick()` that the
+service calls on each NEWBLOCK. A claim that cannot be taken within 90s now **fails the caller with
+a real message** instead of retrying every 400ms forever behind a frozen banner — the old behaviour
+turned a stale lock row from a killed service into a five-minute silent wait.
+
+**Fixed — a latent double-sign hazard in the same file.** The watchdog was module-global while the
+release closed over a per-job owner, so a stalled job whose callback arrived late would clear the
+*current* holder's watchdog and start a third job alongside it — two chains signing at once, the
+exact Winternitz leaf-reuse this file exists to prevent. Releases are now identified by token and a
+late one cannot free somebody else's lock.
+
+**Fixed — `busy` had no escape.** One lost callback left it true for the rest of the session,
+refusing every later action and silently disabling the maker and the processor. It now carries a
+block stamp and clears after `BUSY_STUCK_BLOCKS` with an honest message.
+
+**Fixed — the frozen banner.** A stage line now expires after 45 seconds, as native's does, and the
+page repaints once a second while anything is in flight so it can expire and the pending clocks can
+move. The transaction chain also narrates each phase — waiting for the lock, selecting funding
+coins, registering pool scripts, signing, checking, posting — instead of one line for the whole run.
+
+**Fixed — `price.js` used `setTimeout`** for its fetch watchdog. Replaced with a wall-clock stale
+check driven by the same block loop.
+
+**The guard that should have existed from the start.** `test.js` now builds a faithful model of the
+MDS service scope — `initStandardObjects()` globals plus a fake `MDS`, nothing else — loads every
+module `service.js` loads, and asserts that a real signing operation runs and releases, that two
+operations serialise, and that no service-side file references a browser global at all. `build.sh`
+already gates the zip on `node test.js`, so this class of defect now fails the build instead of a
+user's node.
+
 ## [0.3.6] — the depth ladder froze the app
 
 **Fixed — 0.3.4 made the app unusable whenever a pool was visible.** Checking that a displayed depth

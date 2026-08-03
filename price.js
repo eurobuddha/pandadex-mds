@@ -53,9 +53,12 @@ var PandaPrice = PandaPrice || {};
      transport the service actually has (MDSJS exposes `net` as a public field).
 
      The reply body arrives as a string, base64, or an already-parsed object depending on the node,
-     so it is normalised the way pandapools-mds does. And MDS.net.GET can fail to call back at all,
-     hence the watchdog — without it a lost callback would wedge the feed until restart. */
-  X.NET_TIMEOUT_MS = 10000;
+     so it is normalised the way pandapools-mds does.
+
+     NO TIMERS: the service scope has no setTimeout — see signlock.js. MDS.net.GET can still fail to
+     call back at all, so instead of a watchdog the in-flight flag carries a wall-clock stamp and is
+     cleared by the block-driven refresh once FETCH_STUCK_MS has passed. Same protection, no timer. */
+  X.FETCH_STUCK_MS = 60000;
   X.MAX_BODY = 16384;
   X.parseBody = function (res) {
     var b;
@@ -71,16 +74,9 @@ var PandaPrice = PandaPrice || {};
     return b && typeof b === "object" ? b : null;
   };
   X.http = function (url, done) {
-    var called = false, timer;
-    function finish(err, json) {
-      if (called) return;
-      called = true;
-      if (timer) { try { clearTimeout(timer); } catch (ignore) {} }
-      done(err, json);
-    }
+    var called = false;
+    function finish(err, json) { if (called) return; called = true; done(err, json); }
     try {
-      timer = setTimeout(function () { finish("timeout"); }, X.NET_TIMEOUT_MS);
-      if (timer && timer.unref) timer.unref();
       MDS.net.GET(url, function (res) {
         var json = X.parseBody(res);
         if (!json) return finish(res && res.status === false ? "network error" : "bad JSON");
@@ -100,6 +96,9 @@ var PandaPrice = PandaPrice || {};
   };
   X.refreshAsync = function (done) {
     var now = Date.now();
+    /* A GET whose callback never arrives would otherwise leave `fetching` set forever and the feed
+       permanently dead. Nothing can time it out without a timer, so age it out here instead. */
+    if (X.fetching && now - X.lastTryMs > X.FETCH_STUCK_MS) { X.fetching = false; X.lastError = "price feed timed out"; }
     if (X.fetching || now - X.lastTryMs < X.FETCH_GAP_MS) { if (done) done(null, X.mid()); return; }
     X.fetching = true; X.lastTryMs = now;
     X.http(X.DEPTH_URL, function (err, depth) {

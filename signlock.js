@@ -9,54 +9,48 @@
  *   over DIFFERENT data — a reused one-time signature, which leaks that leaf's private key. This is
  *   not theoretical: 7 of 64 default keys on a live node were confirmed re-used, witness-exact.
  *
- * PandaDEX supplies that concurrency generously. The maker engine posts several actions per cycle;
- * the order processor renews GTC orders on the same blocks; and the UI command path can fire while
- * either is mid-chain. The three `working` booleans in service.js do not cross-check each other, so
- * a maker cycle plus a user tapping CANCEL is enough to sign twice at once.
+ * NO TIMERS. THIS IS NOT NEGOTIABLE.
+ *   The MDS service is Rhino. ServiceJSRunner builds the scope with ctx.initStandardObjects() and
+ *   injects only `MDS` — there is no setTimeout, no setInterval, no XMLHttpRequest. The first
+ *   version of this file called setInterval to start a heartbeat; it threw ReferenceError before
+ *   the work function was ever invoked, the gate stayed held, and the app could not sign or post
+ *   ANYTHING from 0.2.33 until 0.3.7. MDSJS.sql calls JS callbacks with no try/catch, so the error
+ *   vanished upward and the UI simply never changed.
+ *   Date.now() is available. Everything time-based here rides L.tick(), which the service calls on
+ *   every NEWBLOCK. If you add a timer to this file you will break signing again, silently.
  *
- * EVERY path that signs must pass through here — the `txnsign` chains AND the bare `send` commands
- * that create orders and split funding coins, because `send` signs internally too.
- *
- * TWO LAYERS, deliberately:
- *
- *   A. An in-process FIFO queue. Direct port of SignGate.java. In MDS this is the load-bearing
- *      guard, because the service is the sole signer and runs in one JS context.
+ * TWO LAYERS:
+ *   A. An in-process FIFO queue — the load-bearing guard, since the service is the sole signer.
  *   B. A SQL mutex in `sign_lock`, claimed by an INSERT whose primary-key violation IS the
- *      "someone else holds it" signal. Layer B is not strictly required today, but it survives a
- *      service restart mid-chain (a TTL frees it, where an in-memory queue would simply forget),
- *      and it is the only thing that holds if the page ever gains a signing path. Adapted from
- *      pandapools-mds/poolmgr.js:105-144, which solves the same problem across its page/service split.
- *
- * The node's own signing has since been synchronised upstream, but this gate stays: the app also
- * runs against nodes we do not control, and serialising is correct anyway.
+ *      "someone else holds it" signal. It survives a service restart mid-chain, where an in-memory
+ *      queue would simply forget. A contended claim is retried from tick() and eventually FAILS the
+ *      job with a real error — it must never spin silently, which is how a stale row from a killed
+ *      service turned into a five-minute wait with no explanation.
  */
 var PandaSignLock = PandaSignLock || {};
 (function (L) {
 
   L.TABLE = "sign_lock";
-  L.TTL_MS = 5 * 60 * 1000;      /* a holder that dies without releasing frees itself after this */
-  L.HEARTBEAT_MS = 30 * 1000;    /* ...so a live holder must keep saying it is alive */
-  L.RETRY_MS = 400;              /* contended-acquire backoff */
+  L.TTL_MS = 5 * 60 * 1000;          /* a holder that dies without releasing frees itself after this */
+  L.HEARTBEAT_MS = 30 * 1000;        /* ...so a live holder must keep saying it is alive */
+  L.CLAIM_DEADLINE_MS = 90 * 1000;   /* give up claiming and tell the caller, rather than spin */
   /* Longer than the node's write timeout, so this only fires for a genuinely lost callback and
      never for a chain that is merely slow — proof-of-work on a phone is not quick. */
   L.MAX_HOLD_MS = 200 * 1000;
 
-  var sqlFn = null, QUEUE = [], BUSY = false, ACTIVE = null, WATCHDOG = null;
+  var sqlFn = null, QUEUE = [], ACTIVE = null, CLAIMING = false, TOKEN = 0;
 
   /* Inject MDS.sql once at service boot. Without it the SQL layer is skipped and the in-process
      queue still serialises correctly — which is what the unit tests run against. */
   L.use = function (fn) { sqlFn = typeof fn === "function" ? fn : null; };
-  L.busy = function () { return BUSY; };
+  L.busy = function () { return !!ACTIVE; };
   L.queued = function () { return QUEUE.length; };
   /* Test hook only. Drops queued work and forgets the active holder without releasing it. */
-  L.reset = function () { clearWatchdog(); if (ACTIVE) stopBeat(ACTIVE.beat); QUEUE = []; BUSY = false; ACTIVE = null; };
+  L.reset = function () { QUEUE = []; ACTIVE = null; CLAIMING = false; };
 
+  function now() { return Date.now(); }
   function esc(v) { return String(v === undefined || v === null ? "" : v).replace(/'/g, "''"); }
-  function tag() { return Date.now() + "_" + Math.floor(Math.random() * 0xffffff).toString(16); }
-  /* unref so a pending watchdog never holds a `node test.js` run open. */
-  function after(fn, ms) { var t = setTimeout(fn, ms); if (t && t.unref) t.unref(); return t; }
-  function every(fn, ms) { var t = setInterval(fn, ms); if (t && t.unref) t.unref(); return t; }
-  function stopBeat(t) { if (t) clearInterval(t); }
+  function tag() { return now() + "_" + Math.floor(Math.random() * 0xffffff).toString(16); }
 
   /* ---- Layer B: the durable SQL mutex ---- */
 
@@ -64,24 +58,22 @@ var PandaSignLock = PandaSignLock || {};
     if (!sqlFn) return cb();
     sqlFn("CREATE TABLE IF NOT EXISTS `" + L.TABLE + "` (`id` int primary key, `owner` varchar(160), `ts` bigint)", function () { cb(); });
   }
-  function acquire(owner, cb) {
-    if (!sqlFn) return cb();
+  /* One attempt. Never retries internally — retrying is tick()'s job, so a caller can be told. */
+  function acquireOnce(owner, cb) {
+    if (!sqlFn) return cb(true);
     table(function () {
       /* Prune both directions. A row stamped in the future — a device whose clock was later
-         corrected backwards — would never age out of a `ts <` test, wedging every signing path
-         until the clock caught up. */
-      sqlFn("DELETE FROM `" + L.TABLE + "` WHERE `ts`<" + (Date.now() - L.TTL_MS) + " OR `ts`>" + (Date.now() + L.TTL_MS), function () {
-        /* The primary-key violation is the mutex: status:false means somebody else holds row 1. */
-        sqlFn("INSERT INTO `" + L.TABLE + "` (`id`,`owner`,`ts`) VALUES (1,'" + esc(owner) + "'," + Date.now() + ")", function (r) {
-          if (r && r.status === true) return cb();
-          after(function () { acquire(owner, cb); }, L.RETRY_MS);
+         corrected backwards — would never age out of a `ts <` test. */
+      sqlFn("DELETE FROM `" + L.TABLE + "` WHERE `ts`<" + (now() - L.TTL_MS) + " OR `ts`>" + (now() + L.TTL_MS), function () {
+        sqlFn("INSERT INTO `" + L.TABLE + "` (`id`,`owner`,`ts`) VALUES (1,'" + esc(owner) + "'," + now() + ")", function (r) {
+          cb(!!(r && r.status === true));
         });
       });
     });
   }
   function touch(owner) {
     if (!sqlFn) return;
-    sqlFn("UPDATE `" + L.TABLE + "` SET `ts`=" + Date.now() + " WHERE `id`=1 AND `owner`='" + esc(owner) + "'", function () {});
+    sqlFn("UPDATE `" + L.TABLE + "` SET `ts`=" + now() + " WHERE `id`=1 AND `owner`='" + esc(owner) + "'", function () {});
   }
   function release(owner, cb) {
     if (!sqlFn) return cb();
@@ -91,59 +83,71 @@ var PandaSignLock = PandaSignLock || {};
   /* ---- Layer A: the in-process queue ---- */
 
   /* Queue a signing operation. `work` is called with a release whose free() it MUST call exactly
-     once, however the chain ends — success, validation failure, post rejection or transport error.
-     NOT RE-ENTRANT: gating something that itself reaches T.checkPost self-deadlocks, because the
-     inner claim waits on a release that only the outer chain can perform. Gate at exactly one
-     level — currently T.checkPost and the bare `send` paths. */
-  L.gate = function (prefix, work) {
-    QUEUE.push({ prefix: prefix || "sign", work: work });
-    if (!BUSY) next();
+     once, however the chain ends. `onBlocked` is called instead if the lock could not be claimed
+     within CLAIM_DEADLINE_MS — the caller then reports a real failure rather than hanging.
+     NOT RE-ENTRANT: gating something that itself reaches T.checkPost self-deadlocks. Gate at
+     exactly one level — currently T.checkPost and the bare `send` paths. */
+  L.gate = function (prefix, work, onBlocked) {
+    QUEUE.push({ prefix: prefix || "sign", work: work, onBlocked: onBlocked || null, claimAt: 0 });
+    pump();
   };
 
-  function next() {
-    clearWatchdog();
-    var job = QUEUE.shift();
-    if (!job) { BUSY = false; ACTIVE = null; return; }
-    BUSY = true;
-    var owner = job.prefix + "_" + tag();
-    acquire(owner, function () {
-      var beat = sqlFn ? every(function () { touch(owner); }, L.HEARTBEAT_MS) : null;
-      ACTIVE = { owner: owner, beat: beat };
-      scheduleWatchdog();
-      var rel = makeRelease(owner, beat);
-      /* A throw inside the chain must not strand the lock for MAX_HOLD_MS. */
-      try { job.work(rel); } catch (error) { rel.free(); }
+  function pump() {
+    var job, owner;
+    if (ACTIVE || CLAIMING) return;
+    job = QUEUE[0];
+    if (!job) return;
+    if (!job.claimAt) job.claimAt = now();
+    CLAIMING = true;
+    owner = job.prefix + "_" + tag();
+    acquireOnce(owner, function (ok) {
+      CLAIMING = false;
+      if (ok) {
+        QUEUE.shift();
+        TOKEN++;
+        ACTIVE = { owner: owner, token: TOKEN, startedAt: now(), beatAt: now() };
+        var rel = makeRelease(TOKEN);
+        /* A throw inside the chain must not strand the lock until MAX_HOLD_MS. */
+        try { job.work(rel); } catch (error) { rel.free(); }
+        return;
+      }
+      if (now() - job.claimAt > L.CLAIM_DEADLINE_MS) {
+        QUEUE.shift();
+        if (job.onBlocked) { try { job.onBlocked("Another PandaDEX operation still holds the signing lock — nothing was sent; try again shortly"); } catch (ignore) {} }
+        pump();
+      }
+      /* otherwise the job stays at the head of the queue and tick() tries again */
     });
   }
 
-  /* Idempotent — a chain with several exit paths can call free() from all of them. */
-  function makeRelease(owner, beat) {
+  /* Idempotent, and identified by token so a LATE release cannot free somebody else's lock.
+     The previous version compared nothing: a job whose callback arrived after its watchdog had
+     already fired would clear the CURRENT holder's watchdog and start a third job alongside it —
+     two chains signing at once, which is the exact hazard this file exists to prevent. */
+  function makeRelease(token) {
     var freed = false;
     return { free: function () {
+      var owner;
       if (freed) return;
       freed = true;
-      clearWatchdog();
-      stopBeat(beat);
-      release(owner, function () {
-        if (ACTIVE && ACTIVE.owner === owner) ACTIVE = null;
-        next();
-      });
+      if (!ACTIVE || ACTIVE.token !== token) { pump(); return; }
+      owner = ACTIVE.owner;
+      ACTIVE = null;
+      release(owner, function () { pump(); });
     } };
   }
 
-  function scheduleWatchdog() {
-    clearWatchdog();
-    WATCHDOG = after(function () {
-      WATCHDOG = null;
-      var held = ACTIVE;
-      if (!held) { next(); return; }
-      stopBeat(held.beat);
-      release(held.owner, function () {
-        if (ACTIVE && ACTIVE.owner === held.owner) ACTIVE = null;
-        next();
-      });
-    }, L.MAX_HOLD_MS);
-  }
-  function clearWatchdog() { if (WATCHDOG) { clearTimeout(WATCHDOG); WATCHDOG = null; } }
+  /* Called by the service on every NEWBLOCK. Does what the timers used to: retry a contended
+     claim, keep a live holder's row fresh, and force-release a chain whose callback was lost. */
+  L.tick = function () {
+    var held = ACTIVE, n = now();
+    if (!held) { pump(); return; }
+    if (n - held.startedAt > L.MAX_HOLD_MS) {
+      ACTIVE = null;
+      release(held.owner, function () { pump(); });
+      return;
+    }
+    if (n - held.beatAt >= L.HEARTBEAT_MS) { held.beatAt = n; touch(held.owner); }
+  };
 
 })(PandaSignLock);

@@ -3,6 +3,9 @@ var PandaTxn = PandaTxn || {};
   T.run = function (cmd, steps, fail, done, n) { n=n||0; if(n>=steps.length)return done(null); cmd(steps[n],function(r){if(!r||!r.status){if(fail)cmd("txndelete id:"+fail,function(){});return done((r&&r.error)||("Failed: "+steps[n]));}T.run(cmd,steps,fail,done,n+1);}); };
   T.id = function (prefix) { return prefix+"_"+Date.now()+"_"+Math.floor(Math.random()*1000000000); };
   T.MAX_TX_BYTES = 60 * 1024;
+  /* Narration hook. The service points this at PDService.setStage so a trade reports what it is
+     actually doing instead of showing one frozen line for minutes. No-op by default. */
+  T.stage = function () {};
   T.MAX_FUNDING_INPUTS = 8;
   /* `signKey` may be one key, an array of keys (a batch cancel needs one signature per distinct
      owner), or nothing at all — which means `auto`. Every build->sign->post chain in this file
@@ -10,6 +13,7 @@ var PandaTxn = PandaTxn || {};
      concurrent signs of one Winternitz key reuse a leaf and leak it. */
   T.checkPost = function (cmd,id,steps,done,signKey) {
     var keys = signKey ? (Array.isArray(signKey)?signKey:[signKey]) : ["auto"];
+    T.stage("Waiting for the signing lock…");
     PandaSignLock.gate("dex", function (release) {
       /* Release exactly once, on every exit path — success, validation failure, post rejection
          and build error alike. Holding it past the chain would stall the maker for MAX_HOLD_MS. */
@@ -19,7 +23,9 @@ var PandaTxn = PandaTxn || {};
       steps.push("txnbasics id:"+id);
       /* txncheck is the only command whose response is the validation verdict. Do not infer
        * validity from txnlist or txnpost: the latter merely means mempool acceptance. */
+      T.stage("Signing " + steps.length + " step" + (steps.length===1?"":"s") + "…");
       T.run(cmd,steps,id,function(err){ if(err)return finish(err);
+        T.stage("Checking the transaction before it is sent…");
         /* Size gate before the validation gate. A transaction over the node's limit is rejected
            at post with a far less useful error, and composite fills (pool pairs + order coins +
            funding) are exactly the shape that overflows. A txnexport we cannot read is not
@@ -43,11 +49,12 @@ var PandaTxn = PandaTxn || {};
             cmd("txndelete id:"+id,function(){});
             return finish("Transaction failed validation (scripts="+scripts+" basic="+basic+" amounts="+amounts+" mmr="+mmr+" sigs="+sigs+")");
           }
+          T.stage("Posting to the network…");
           cmd("txnpost id:"+id,function(post){if(!post||(!post.status&&!post.pending)){cmd("txndelete id:"+id,function(){});return finish((post&&post.error)||"Transaction was not accepted");}cmd("txndelete id:"+id,function(){});finish(null,post.response&&post.response.txpowid||id);});
         });
         });
       });
-    });
+    }, function (blocked) { done(blocked); });
   };
   /* Orders can belong to an older wallet key. `auto` may choose the current receive key,
      but the V5 owner branch requires SIGNEDBY(port 0), so cancel must name that exact key. */
@@ -73,7 +80,7 @@ var PandaTxn = PandaTxn || {};
      issue, and DexTxnCompositeLayoutTest asserts the false. */
   T.ensurePools = function(cmd,allocs,idx,done){var p,script;if(idx>=(allocs||[]).length)return done();p=allocs[idx].pool;script=p.covenantScript||PandaPool.script(p.opk,p.oadr,p.tok,p.kmin);cmd("newscript trackall:false script:"+PandaPool.scriptArg(script),function(){T.ensurePools(cmd,allocs,idx+1,done);});};
   T.prepareComposite = function(plan,takerBuys){var prep={route:plan.poolRoute,payTok:takerBuys?P.USDT:"0x00",needed:P.d(0),payments:[],partial:null,partialRem:null,partialNewWant:null},i,t,o,lockedTake,pay;for(i=0;i<(plan.orderTakes||[]).length;i++){t=plan.orderTakes[i];o=t.order;lockedTake=!t.partial?P.d(o.locked):(o.sell?P.d(t.minima):P.up(P.d(t.minima).mul(o.price),P.DP));pay=t.partial?P.up(P.d(o.wantAmt).mul(lockedTake).div(o.locked),P.DP):P.d(o.wantAmt);prep.payments.push([P.plain(pay),o.wantAddr,o.wantTok]);prep.needed=prep.needed.add(pay);if(t.partial){prep.partial=t;prep.partialRem=P.d(o.locked).sub(lockedTake);prep.partialNewWant=P.up(P.d(o.wantAmt).mul(prep.partialRem).div(o.locked),P.DP);if(prep.partialNewWant.gt(o.wantAmt))prep.partialNewWant=P.d(o.wantAmt);}}if(prep.route&&prep.route.ok)prep.needed=prep.needed.add(prep.route.totalIn);return prep;};
-  T.fillComposite = function(cmd,identity,plan,takerBuys,done){var prep,exclude={},i,a;if(!plan||PandaComposite.isEmpty(plan))return done("Nothing to fill");prep=T.prepareComposite(plan,!!takerBuys);exclude[String(P.ADDR).toLowerCase()]=true;if(prep.route){for(i=0;i<(prep.route.pairAddresses||[]).length;i++)exclude[String(prep.route.pairAddresses[i]||"").toLowerCase()]=true;for(i=0;i<(prep.route.allocs||[]).length;i++){a=prep.route.allocs[i];exclude[String(a.pool.address||"").toLowerCase()]=true;exclude[String(a.pool.oadr||"").toLowerCase()]=true;}}T.findCoins(cmd,prep.payTok,prep.needed,exclude,8,function(err,coins,sum){if(err)return done(err);T.ensurePools(cmd,prep.route&&prep.route.ok?prep.route.allocs:[],0,function(){T.buildComposite(cmd,identity,plan,prep,!!takerBuys,coins,sum,done);});});};
+  T.fillComposite = function(cmd,identity,plan,takerBuys,done){var prep,exclude={},i,a;if(!plan||PandaComposite.isEmpty(plan))return done("Nothing to fill");prep=T.prepareComposite(plan,!!takerBuys);exclude[String(P.ADDR).toLowerCase()]=true;if(prep.route){for(i=0;i<(prep.route.pairAddresses||[]).length;i++)exclude[String(prep.route.pairAddresses[i]||"").toLowerCase()]=true;for(i=0;i<(prep.route.allocs||[]).length;i++){a=prep.route.allocs[i];exclude[String(a.pool.address||"").toLowerCase()]=true;exclude[String(a.pool.oadr||"").toLowerCase()]=true;}}T.stage("Selecting funding coins…");T.findCoins(cmd,prep.payTok,prep.needed,exclude,8,function(err,coins,sum){if(err)return done(err);T.stage("Registering pool scripts…");T.ensurePools(cmd,prep.route&&prep.route.ok?prep.route.allocs:[],0,function(){T.buildComposite(cmd,identity,plan,prep,!!takerBuys,coins,sum,done);});});};
   /* Pure so the covenant's index rules are directly testable: pool reserve PAIRS first (even leg
      MINIMA, odd leg token), then whole order coins, then funding; outputs recreate each pool, then
      index-matched order payments, then the single partial remainder, then proceeds, then change. */
@@ -84,7 +91,7 @@ var PandaTxn = PandaTxn || {};
   T.create = function(cmd,identity,input,done){var minima=P.down(input.minima,P.DP),price=P.d(input.price),usdt=P.up(minima.mul(price),P.DP),buy=!!input.buy,lock=buy?usdt:minima,want=buy?minima:usdt,minimaRem=P.down(input.minRem||0,P.DP),minRem=buy?P.up(minimaRem.mul(price),P.DP):minimaRem;if(minima.lt(P.MIN_ORDER)||lock.gt(P.MAX_ORDER)||want.gt(P.MAX_ORDER))return done("Order size is outside the permitted range");if(minRem.gt(lock))return done("Minimum remainder is larger than the order itself");/* `send` signs internally, so it needs the gate exactly as much as a txnsign chain does —
      this is the case SignGate.java's javadoc singles out. The `random` call below is read-only
      and deliberately stays outside it. */
-  function sendOrder(oid){var state={"0":identity.publickey,"1":identity.address,"2":P.plain(want),"3":buy?"0x00":P.USDT,"4":oid,"5":buy?"0":"1","6":P.plain(price),"7":input.gtc===false?"0":"1","8":P.plain(minRem)};PandaSignLock.gate("send",function(release){cmd("send amount:"+P.plain(lock)+" address:"+P.ADDR+(buy?" tokenid:"+P.USDT:"")+" state:"+JSON.stringify(state),function(r){release.free();done((!r||(!r.status&&!r.pending))&&((r&&r.error)||"Order was not accepted"),r&&r.response&&r.response.txpowid,oid);});});}if(input.orderId)return sendOrder(input.orderId);cmd("random",function(rand){var oid=rand&&rand.status&&rand.response&&rand.response.random;if(!oid)return done("Could not create a safe order id");sendOrder(oid);});};
+  function sendOrder(oid){var state={"0":identity.publickey,"1":identity.address,"2":P.plain(want),"3":buy?"0x00":P.USDT,"4":oid,"5":buy?"0":"1","6":P.plain(price),"7":input.gtc===false?"0":"1","8":P.plain(minRem)};T.stage("Waiting for the signing lock…");PandaSignLock.gate("send",function(release){T.stage("Signing and sending the order…");cmd("send amount:"+P.plain(lock)+" address:"+P.ADDR+(buy?" tokenid:"+P.USDT:"")+" state:"+JSON.stringify(state),function(r){release.free();done((!r||(!r.status&&!r.pending))&&((r&&r.error)||"Order was not accepted"),r&&r.response&&r.response.txpowid,oid);});},function(blocked){done(blocked);});}if(input.orderId)return sendOrder(input.orderId);cmd("random",function(rand){var oid=rand&&rand.status&&rand.response&&rand.response.random;if(!oid)return done("Could not create a safe order id");sendOrder(oid);});};
   T.fill = function(cmd,identity,plan,done){
     if(!plan||!plan.takes||!plan.takes.length)return done("Nothing to fill");
     var buy=plan.takes[0].order.sell,payTok=buy?P.USDT:"0x00",needed=P.d(0),i,t,o,partial=null,proceeds=P.d(0),steps=[],id=T.id("sweep"),exclude={};

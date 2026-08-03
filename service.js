@@ -2,7 +2,7 @@
 MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("pool.js"); MDS.load("composite.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js"); MDS.load("split.js");
 
 var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, keysReady:false, keysRetryBlock:0, ready:false, scanning:false, rescan:false, busy:false,
-  pendingRows:[], pendingRefs:{}, filling:{}, stage:"", fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
+  pendingRows:[], pendingRefs:{}, filling:{}, stage:"", stageAtMs:0, busyBlock:0, fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
   stats:{last:null, changePct:null, high:null, low:null, volume:"0", lastFill:null},
   cancelled:{}, diff:null, restQueue:null, restQueueCoins:null, restQueueBlock:0,
   pools:[], poolScanning:false, poolHaveLive:false, poolEmptyScans:0,
@@ -11,6 +11,14 @@ PDService.SWEEP_DEADLINE_BLOCKS = 6;
 /* A processor run that loses its callback would otherwise hold `working` for the whole session and
    silently stop renewing GTC orders. Force-clear it after this many blocks. */
 PDService.PROCESSOR_STUCK_BLOCKS = 4;
+/* `busy` had no escape at all: one lost callback anywhere in the transaction chain left it true
+   for the rest of the session, refusing every later action with "a transaction is already in
+   flight" and silently disabling the maker and the processor. The block clock is the only clock
+   this service has. */
+PDService.BUSY_STUCK_BLOCKS = 8;
+/* A stage line older than this renders as nothing, so the banner can never sit there lying about
+   what the app is doing. Native holds a stage for the same 45 seconds. */
+PDService.STAGE_HOLD_MS = 45000;
 PDService.MAKER_MIN_CYCLE_MS = 60000;
 PDService.MAKER_MAX_ACTIONS = 4;
 PDService.MAKER_MAX_CREATES_SIDE = 1;
@@ -106,10 +114,22 @@ PDService.snapshot = function() {
   PDService.tell("STATE", {ready:PDService.ready, block:PDService.block, identity:PDService.identity,
     book:PDService.book, pools:PDService.pools, poolsSyncing:!PDService.poolHaveLive, mine:mine, pending:PDService.pendingRefs, pendingRows:PDService.pendingRows,
     filling:PDService.filling, stats:PDService.stats,
-    stage:PDService.stage, busy:PDService.busy, tape:PDService.tape, myTrades:PDService.myTrades,
+    stage:PDService.stageNow(), busy:PDService.busy, tape:PDService.tape, myTrades:PDService.myTrades,
     maker:PDService.makerPublic()});
 };
-PDService.setStage = function(message) { PDService.stage = message || ""; PDService.snapshot(); };
+PDService.setStage = function(message) { PDService.stage = message || ""; PDService.stageAtMs = Date.now(); PDService.snapshot(); };
+PDService.stageNow = function() {
+  if (!PDService.stage) return "";
+  return Date.now() - Number(PDService.stageAtMs || 0) > PDService.STAGE_HOLD_MS ? "" : PDService.stage;
+};
+/* Mark the start of a fund-moving action so the block clock can free it if its callback is lost. */
+PDService.setBusy = function(on) { PDService.busy = !!on; PDService.busyBlock = on ? PDService.block : 0; };
+PDService.releaseStuckBusy = function() {
+  if (!PDService.busy || PDService.block <= 0 || Number(PDService.busyBlock || 0) <= 0) return;
+  if (PDService.block - Number(PDService.busyBlock) <= PDService.BUSY_STUCK_BLOCKS) return;
+  PDService.setBusy(false); PDService.busyBlock = 0;
+  PDService.setStage("That transaction never came back from the node. Nothing further was sent — check ORDERS and your balance before retrying.");
+};
 PDService.loadTape = function(done) {
   PandaTape.tapeRows(120, function(tape) {
     PDService.tape = tape;
@@ -451,12 +471,12 @@ PDService.makerWithdraw = function() { PDService.makerWithdrawAll(true); };
 PDService.cancelAllRun = function(list, idx, ok, failed) {
   var chunk, i, rows = [];
   if (idx >= list.length) {
-    PDService.busy = false;
+    PDService.setBusy(false);
     PDService.setStage(failed === 0 ? "Cancel sent for " + ok + " order" + (ok === 1 ? "" : "s") + " — each leaves the book when a block confirms it" : "Cancel sent for " + ok + "; " + failed + " could not be cancelled — check your open orders");
     return PDService.refresh();
   }
   chunk = list.slice(idx, idx + PandaDEX.MAX_ORDERS);
-  PDService.busy = true;
+  PDService.setBusy(true);
   PDService.setStage("Cancelling " + Math.min(idx + chunk.length, list.length) + " of " + list.length + "…");
   PandaTxn.cancelBatch(PDService.cmd, chunk, function(error, tx) {
     if (error) {
@@ -578,9 +598,9 @@ PDService.placeRest = function() {
   PDService.restQueue = null; PDService.restQueueCoins = null; PDService.restQueueBlock = 0;
   if (!q) return;
   PDService.setStage("Placing the unfilled balance as a resting limit order");
-  PDService.busy = true;
+  PDService.setBusy(true);
   PandaTxn.create(PDService.cmd, PDService.identity, q, function(error, tx, orderId) {
-    PDService.busy = false;
+    PDService.setBusy(false);
     if (error) { PDService.setStage("Resting order failed — " + error); return PDService.tell("ERROR", {message:error}); }
     PDService.addPending(PandaPending.PLACE, {orderId:orderId, buy:!!q.buy, minima:q.minima, price:q.price});
     PDService.setStage("Resting limit order submitted — waiting for confirmation");
@@ -615,6 +635,10 @@ PDService.refresh = function() {
       }
       if (changed) PDService.savePending();
     }
+    /* The signing gate has no timers — the service scope has none. This is what keeps its
+       heartbeat alive, retries a contended claim, and force-releases a lost callback. */
+    PandaSignLock.tick();
+    PDService.releaseStuckBusy();
     PDService.retryKeysIfStale();
     PDService.refreshPools();
     PDService.reconcileFill(visibleBook);
@@ -676,6 +700,8 @@ PDService.boot = function() {
   /* Give the signing gate its durable layer. Without this it still serialises correctly inside
      this context; with it, a lock survives a service restart mid-chain and frees itself by TTL. */
   PandaSignLock.use(MDS.sql);
+  /* Let the transaction layer narrate. Without this the UI shows one line for the whole chain. */
+  PandaTxn.stage = function(message) { PDService.setStage(message); };
   PDService.cmd("runscript script:" + PDService.scriptArg(), function(scriptResult) {
     var script = scriptResult && scriptResult.response && scriptResult.response.script;
     if (!scriptResult.status || !scriptResult.response.parseok || !script || String(script.address).toUpperCase() !== PandaDEX.ADDR.toUpperCase())
@@ -719,9 +745,9 @@ PDService.action = function(message) {
     if (!PDService.identity || !PDService.identity.address) return PDService.tell("ERROR", {message:"Still reading your wallet identity — try again in a moment"});
     amountD = PDService.maybeDec(data.amount);
     if (!amountD || !amountD.gt(0)) return PDService.tell("ERROR", {message:"Enter an amount to split"});
-    PDService.busy = true; PDService.setStage("Splitting funding coins…");
+    PDService.setBusy(true); PDService.setStage("Splitting funding coins…");
     return PandaSplit.run(PDService.cmd, PDService.identity.address, data.tokenid || "0x00", amountD, function(error, tx) {
-      PDService.busy = false;
+      PDService.setBusy(false);
       if (error) { PDService.setStage("Split failed — " + error); return PDService.tell("ERROR", {message:error}); }
       PDService.setStage("Split posted — wait for the next block, then publish the ladder");
       PDService.tell("POSTED", {message:PandaSplit.COUNT + " funding coins requested — wait for a block, then publish", tx:tx});
@@ -744,9 +770,9 @@ PDService.action = function(message) {
       PDService.filling = {};
       for (i = 0; i < comp.sourceCoinIds.length; i++) PDService.filling[comp.sourceCoinIds[i]] = true;
       rest = amountD.sub(comp.totalMinima);
-      PDService.busy = true; PDService.setStage("Building blended transaction… selecting coins and signing");
+      PDService.setBusy(true); PDService.setStage("Building blended transaction… selecting coins and signing");
       return PandaTxn.fillComposite(PDService.cmd, PDService.identity, comp, !!data.buy, function(error, tx) {
-        PDService.busy = false;
+        PDService.setBusy(false);
         if (error) { PDService.filling = {}; PDService.setStage("Trade failed — " + error); return PDService.tell("ERROR", {message:error}); }
         PDService.setStage("Posted — waiting for a block to confirm your " + (data.buy ? "buy" : "sell") + " of " + PandaDEX.plain(comp.totalMinima) + " MINIMA");
         PDService.tell("POSTED", {message:"Blended trade submitted — waiting for confirmation", tx:tx});
@@ -765,9 +791,9 @@ PDService.action = function(message) {
     }
     plan = PandaBook.plan(PDService.book, !!data.buy, data.minima, data.price || null, PDService.block);
     if (!plan || !plan.takes || !plan.takes.length) {
-      PDService.busy = true; PDService.setStage("Building transaction… selecting coins and signing");
+      PDService.setBusy(true); PDService.setStage("Building transaction… selecting coins and signing");
       return PandaTxn.create(PDService.cmd, PDService.identity, data, function(error, tx, orderId) {
-        PDService.busy = false;
+        PDService.setBusy(false);
         if (error) { PDService.setStage("Order failed — " + error); return PDService.tell("ERROR", {message:error}); }
         PDService.addPending(PandaPending.PLACE, {orderId:orderId, buy:!!data.buy, minima:data.minima, price:data.price});
         PDService.setStage("Order submitted — waiting for confirmation");
@@ -777,9 +803,9 @@ PDService.action = function(message) {
     PDService.filling = {};
     for (i = 0; i < plan.takes.length; i++) PDService.filling[plan.takes[i].order.coinid] = true;
     rest = PDService.dec(data.minima).sub(plan.totalMinima);
-    PDService.busy = true; PDService.setStage("Building transaction… selecting coins and signing");
+    PDService.setBusy(true); PDService.setStage("Building transaction… selecting coins and signing");
     return PandaTxn.fill(PDService.cmd, PDService.identity, plan, function(error, tx) {
-      PDService.busy = false;
+      PDService.setBusy(false);
       if (error) { PDService.filling = {}; PDService.setStage("Trade failed — " + error); return PDService.tell("ERROR", {message:error}); }
       PDService.setStage("Posted — waiting for a block to confirm your " + (data.buy ? "buy" : "sell") + " of " + PandaDEX.plain(plan.totalMinima) + " MINIMA");
       PDService.tell("POSTED", {message:"Trade submitted — waiting for confirmation", tx:tx});
@@ -801,10 +827,10 @@ PDService.action = function(message) {
     for (i = 0; i < PDService.book.length; i++) if (PDService.book[i].coinid === data.coinid) order = PDService.book[i];
     if (!PDService.owns(order)) return PDService.tell("ERROR", {message:"That is not one of your active orders"});
     if (PDService.pendingRefs[order.coinid] === "cancel") return PDService.tell("ERROR", {message:"That cancellation is already waiting for confirmation"});
-    PDService.busy = true; PDService.setStage("Submitting cancellation…");
+    PDService.setBusy(true); PDService.setStage("Submitting cancellation…");
     return PandaTxn.cancel(PDService.cmd, order, function(error, tx) {
       var wasMaker = PDService.makerOwnedIds()[order.orderId];
-      PDService.busy = false;
+      PDService.setBusy(false);
       if (error) { PDService.setStage("Cancellation failed — " + error); return PDService.tell("ERROR", {message:error}); }
       if (wasMaker) { PDService.makerForgetByOrderId(order.orderId); PDService.makerTombstone(order.orderId, PDService.block, PDService.block); }
       PDService.addPending(PandaPending.CANCEL, {orderId:order.orderId, coinid:order.coinid, buy:!order.sell, minima:PandaDEX.plain(order.minima), price:PandaDEX.plain(order.price)});
@@ -835,9 +861,9 @@ PDService.action = function(message) {
     priceD = PDService.maybeDec(data.price);
     if (!priceD || !priceD.gt(0)) return PDService.tell("ERROR", {message:"Enter a valid new price"});
     data.price = PandaDEX.plain(priceD);
-    PDService.busy = true; PDService.setStage("Submitting reprice…");
+    PDService.setBusy(true); PDService.setStage("Submitting reprice…");
     return PandaTxn.relock(PDService.cmd, order, PandaTxn.newWantForPrice(order, data.price), function(error, tx) {
-      PDService.busy = false;
+      PDService.setBusy(false);
       if (error) { PDService.setStage("Reprice failed — " + error); return PDService.tell("ERROR", {message:error}); }
       PDService.addPending(PandaPending.EDIT, {orderId:order.orderId, coinid:order.coinid, buy:!order.sell, minima:PandaDEX.plain(order.minima), price:data.price});
       PDService.setStage("Reprice submitted — waiting for confirmation");
