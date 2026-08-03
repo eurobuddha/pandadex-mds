@@ -3,6 +3,70 @@
 Newest first. Each entry names the native PandaDEX version it reaches parity with, and the specific
 on-chain failure it prevents.
 
+## [0.3.5] — phantom trades, a price feed that could never work, and five more
+
+Findings from a full review of the hand-written MDS code. Every fix is pinned by a test.
+
+**Fixed — an unexplained disappearance was recorded as a trade.** `recordObservedFill` verified a
+full vanish but suppressed only `CANCELLED`; `UNKNOWN` fell through and was written to the tape.
+`PandaVerify` returns `UNKNOWN` for any reply it cannot read, so one node hiccup was enough to
+invent a trade that never happened — into the tape, the candles, the 24h stats, `my_trades`, the
+P&L and the accounting export. Native drops `UNKNOWN` for exactly this reason: a lost trade is
+invisible to the user, a phantom one is not. Only `FILLED` records now.
+
+**Fixed — pegged market-making could never work, and would have pulled the ladder off the book.**
+`price.js` fetched with `XMLHttpRequest`, but it is loaded only into the service — Rhino with a
+Java-backed `MDS`, which has no XHR. Every fetch threw and was swallowed as "network error", so the
+mid stayed 0 and `mustWithdraw()` stayed true: a pegged ladder could not be published, and an armed
+one would be auto-withdrawn. Now uses `MDS.net.GET` with the body normalised (string / base64 /
+object) and a watchdog, because `net.GET` can fail to call back at all.
+
+**Fixed — an over-cap book scan silently dropped orders.** The window only halved on `status:false`,
+but an MDS reply over ~256KB comes back *empty*, which read as a genuinely empty range. Those orders
+vanished from the book and the tape then saw them as vanished. A wide empty window is now
+re-checked once at half width, bounded to one extra call per region.
+
+**Fixed — `T.fill` had no funding-input cap.** It inlined its own coin selection with no limit, so a
+wallet of dust built an oversized transaction caught only by the 60KB gate — *after* signing, which
+burns a one-time key leaf for nothing. It now uses `findCoins`, which caps at 8 and refuses up front.
+
+**Fixed — the wrong pool was dropped when a composite plan exceeded capacity.** `smallestPool`
+ranked by `quote.outAmount`, which is the mxUSDT leg on the sell side. It now measures the MINIMA
+contribution per side, as native does.
+
+**Fixed — CSV formula injection in the export.** An order id is state port 4, chosen by whoever
+created the order and never validated, and it landed unescaped in `confirmed_trades.csv`. Anyone
+could put `=HYPERLINK(...)` on the book and have it execute when you opened your reconciliation.
+
+**Fixed — `T.create` bounded only the locked leg.** The covenant compares by cross-multiplication and
+overflow safety rests on the per-*leg* cap, so a large sell above price 1 sent an unbounded want side.
+
+**Also:** `market_tape` gains the `timems` index native has; port 6 is want-per-locked everywhere and
+rounded to `PRICE_DP` instead of emitting up to 40 digits; the buy side reports the MINIMA actually
+delivered rather than a floored figure that made the resting remainder too large; the sign lock
+prunes future timestamps so a backwards clock cannot wedge signing; `onclick` arguments are gated to
+a charset that cannot close the JS string; `VANISH_AGE` derives from `HORIZON` again.
+
+## [0.3.4] — pool depth was showing twice the liquidity it could deliver
+
+Parity: native `SyntheticDepth`.
+
+**Fixed** — a depth band answers *"how much can I take before the next slice costs more than this
+price?"* — a **marginal** price. `Synthetic.solveToBoundary` was searching on the **average**
+effective price over the whole size. On a constant-product curve those differ by a factor
+approaching two: taking `Q` from reserves `(x,y)` moves the marginal price by ~`2Q/x` but the
+average by only ~`Q/x`. Measured on a 100000/500 pool the overstatement was **1.975×** one tick out,
+rising toward 2.0 as the band narrows. Only the display was affected — the router already priced on
+true marginal cost — but the ladder advertised depth that was not there at that price.
+
+**Also fixed in the same function:** band prices are now snapped onto the tick grid (ceiling for
+asks, floor for bids) so pool rows merge with the book's own levels instead of sitting at raw curve
+prices; and each cumulative band is re-planned through the real router at its own displayed limit
+and shaved back until the plan actually fills it. Solve iterations are 8, matching native.
+
+Sampling is memoised on block, tick and pool reserves — it became far more expensive, and native hit
+the same wall and moved it to a background depth worker.
+
 ## [0.3.3] — a partial fill that hit the dust floor built a transaction the covenant rejects
 
 Parity: native `0.3.9` arithmetic (`PriceMath`, `SweepPlanner`).
