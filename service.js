@@ -1,5 +1,5 @@
 /* ES5 service: the sole chain/transaction owner. Never touches the DOM. */
-MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("pool.js"); MDS.load("composite.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js"); MDS.load("split.js");
+MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("pool.js"); MDS.load("composite.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js"); MDS.load("split.js"); MDS.load("history.js");
 
 var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, keysReady:false, keysRetryBlock:0, ready:false, scanning:false, rescan:false, busy:false,
   pendingRows:[], pendingRefs:{}, filling:{}, stage:"", stageAtMs:0, busyBlock:0, fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
@@ -268,27 +268,50 @@ PDService.queueVanish = function(spentCoin, order, size, price, takerBuy, since)
   PDService.vanished.push({coinid:spentCoin, order:order, size:size, price:price, buy:takerBuy, since:since});
 };
 PDService.settleVanished = function() {
-  var batch = PDService.vanished, i;
+  var batch = PDService.vanished, ids = [], i;
   PDService.vanished = [];
   if (!batch.length) return;
-  PandaVerify.verifyBatch(PDService.cmd, batch, PDService.block, function(verdicts) {
-    var j, it, verdict;
+  for (i = 0; i < batch.length; i++) ids.push(batch[i].coinid);
+  /* TRUE HISTORY FIRST. Ask the chain what actually spent each coin and read that transaction's
+     outputs — definitive, order-linked, and still available long after the proceeds were spent
+     onward, which is the case payout evidence can never recover. Only what history cannot answer
+     falls through to the exclusive payout rule below. */
+  PandaHistory.findSpends(PDService.cmd, ids, function(spends) {
+    var settled = {}, rest = [], j, it, spend, verdict;
     for (j = 0; j < batch.length; j++) {
       it = batch[j];
-      verdict = verdicts[it.coinid] || PandaVerify.UNKNOWN;
-      if (verdict === PandaVerify.CANCELLED) { PDService.noteCancelled(it.coinid); continue; }
-      if (verdict !== PandaVerify.FILLED) continue;   /* unprovable — never recorded */
-      PDService.storeObservedFill(it.coinid, it.order, it.size, it.price, it.buy, false);
+      spend = spends[it.coinid];
+      verdict = spend ? PandaHistory.verdictFor(spend.outputs, it.order, PDService.sameAmount) : null;
+      if (!verdict) { rest.push(it); continue; }
+      settled[it.coinid] = true;
+      if (verdict === "CANCELLED") { PDService.noteCancelled(it.coinid); continue; }
+      PDService.storeObservedFill(it.coinid, it.order, it.size, it.price, it.buy, false, spend.txpowid, "CHAIN_VERIFIED");
     }
+    if (!rest.length) return;
+    PandaVerify.verifyBatch(PDService.cmd, rest, PDService.block, function(verdicts) {
+      var k, r, v;
+      for (k = 0; k < rest.length; k++) {
+        r = rest[k];
+        v = verdicts[r.coinid] || PandaVerify.UNKNOWN;
+        if (v === PandaVerify.CANCELLED) { PDService.noteCancelled(r.coinid); continue; }
+        if (v !== PandaVerify.FILLED) continue;   /* unprovable — never recorded */
+        PDService.storeObservedFill(r.coinid, r.order, r.size, r.price, r.buy, false, "", "LOCAL_VERIFIED");
+      }
+    });
   });
 };
-PDService.storeObservedFill = function(spentCoin, order, size, price, takerBuy, partial) {
+PDService.sameAmount = function(a, b) { try { return PandaDEX.d(a).eq(PandaDEX.d(b)); } catch (ignore) { return false; } };
+PDService.storeObservedFill = function(spentCoin, order, size, price, takerBuy, partial, txpowid, how) {
   var mine = PDService.owns(order);
   PandaTape.addFill({spentcoin:spentCoin, timems:Date.now(), block:PDService.block, price:price,
     size:size, buy:takerBuy, partial:partial === true && size.lt(order.minima), mine:mine}, function() {
     if (mine) {
       PandaTape.addMyTrade({spentcoin:spentCoin, timems:Date.now(), block:PDService.block, price:price,
-        size:size, buy:takerBuy, maker:true, orderid:order.orderId}, function(added) {
+        size:size, buy:takerBuy, maker:true, orderid:order.orderId, txpowid:txpowid || "", sourceKind:"BOOK",
+        verificationStatus:how || "LOCAL_VERIFIED",
+        verificationNote:(how === "CHAIN_VERIFIED" ? "Read from the transaction that spent the order coin"
+          : (partial ? "Partial fill proven by successor order" : "Full fill proven by payout evidence")),
+        verifiedBlock:PDService.block}, function(added) {
           if (added) PDService.notify((partial === true && size.lt(order.minima) ? "Order partially filled: " : "Order filled: ") + (order.sell ? "Sold " : "Bought ") + PandaDEX.plain(size) + " MINIMA @ " + PandaDEX.plain(price) + " mxUSDT");
           PDService.loadTape(function() { PDService.snapshot(); });
         });

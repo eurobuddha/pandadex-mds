@@ -1,7 +1,7 @@
 # Parity audit — PandaDEX MiniDapp vs native PandaDEX
 
 Native reference: `apks/pandadex` **0.3.9** (50 classes, 27 test classes).
-MiniDapp audited: **0.3.9**.
+MiniDapp audited: **0.4.0**.
 
 Every row was checked by reading both sides. Status is one of **Yes** (behaviour matches),
 **Partial** (present but differs — the difference is stated), **No** (absent), or **N/A**
@@ -206,23 +206,45 @@ persisted in `fill_state`, so a service restart between posting and confirmation
 the trade. Ported from `TakerConfirmationTest`, including that an unreadable reply must never read
 as spent, and that a token payout is measured by `tokenamount` rather than the raw amount.
 
-## 15. Fill adjudication — STRONGER THAN NATIVE in 0.3.9
+## 15. Fill adjudication — AHEAD OF NATIVE
 
-Native's `FillVerifier` adjudicates each vanished order **independently**: fetch coins at its payout
-address, match on token and amount. Every order a wallet creates carries the same payout address, so
-one cancelled ask rung's refund satisfies "payment" for every bid rung of the same size that vanishes
-in the same window. Measured on the reported ladder: **three cancellations produced three phantom
-trades**; with the fix, zero, and the three cancels are correctly identified.
+Three layers, strongest first. Both of the first two are new and are the items to port back.
 
-The fix is exclusivity, not a better predicate. `PandaVerify.adjudicateBatch` settles every vanish in
-a scan together, and **a coin is evidence for at most one order** — clean refunds claim first (which
-is what stops a refund being read as somebody else's payment), payments take what remains, and
-native's payment-wins precedence is preserved for a genuinely ambiguous single order so this ports
-back without a behaviour change. Evidence must also be newer than the last block the order was
-actually seen alive, so a pre-existing coin cannot explain a disappearance.
+**Layer 1 — true history (`history.js`).** Ask the chain what actually spent the order coin and read
+that transaction's outputs: a payout of `wantAmt` in `wantTok` to the order's payout address is
+FILLED; a refund of `locked` in `lockedTok` is CANCELLED. Order-linked and definitive — no amount
+coincidence between two orders can confuse it, and it still works long after the proceeds were spent
+onward, which is the case **no** UTXO-based rule can recover. That case is the common one for your
+own orders, because the maker re-spends proceeds to fund the next rung.
 
-**This is the item to port back to the APK.** `verifier.js` `adjudicateBatch` / `findUnclaimed` /
-`earliest` map directly onto `FillVerifier`, and `tape.js` supplies the last-seen block.
+`history relevant:true` returns only wallet-relevant transactions, so the calls are spent exactly
+where they pay: our own orders, and orders we filled. A stranger's order filled by another stranger
+never appears and correctly falls through. It also answers something nothing else can — **a cancel
+posted from another device on the same seed**, which the local cancel log cannot know about.
+
+Paged with the discipline `pandapools-mds/history.js` has been carrying on mainnet: start at `max:8`,
+halve on a bad page and retry the same offset, skip past a single oversized transaction at `max:1`,
+and stop at a hard call budget. Rows verified this way are stamped `CHAIN_VERIFIED`.
+
+**Layer 2 — exclusive payout evidence (`verifier.js`).** For everything history cannot answer.
+Native's `FillVerifier` adjudicates each vanished order **independently**, and since every order a
+wallet creates shares one payout address, a single cancelled ask rung's refund satisfies "payment"
+for every bid rung of the same size. Measured on the reported ladder: **three cancellations produced
+three phantom trades**; with exclusivity, zero, and the three cancels are correctly identified.
+`adjudicateBatch` settles every vanish in a scan together and a coin is evidence for at most one
+order — clean refunds claim first, payments take what remains. Native's payment-wins precedence is
+preserved for a genuinely ambiguous single order so this ports back without a behaviour change.
+Evidence must also be newer than the last block the order was seen alive.
+
+**Layer 3 — UNKNOWN, dropped.** Never recorded. A lost trade is invisible; a phantom one is not.
+
+**Port-back list for the APK:** `history.js` (`findSpends` / `verdictFor`) ahead of `FillVerifier`,
+and `adjudicateBatch` / `findUnclaimed` / `earliest` replacing its per-order adjudication.
+`tape.js` supplies the last-seen block both rely on.
+
+**Residual, accepted:** a stranger's fill, filled by another stranger, whose payout was spent onward
+before we looked. Not wallet-relevant so history cannot see it, and no unspent coin remains to point
+at. Market-tape completeness only.
 
 ---
 
@@ -230,9 +252,9 @@ actually seen alive, so a pre-existing coin cannot explain a disappearance.
 
 | | Count |
 |---|---|
-| Yes | 76 |
+| Yes | 77 |
 | Partial | 11 |
-| No | 4 |
+| No | 3 |
 | N/A (platform) | 6 |
 
 **The four real absences:** ticker pulse animation; persisted book cache / cold-start paint; the
@@ -241,4 +263,5 @@ book's confirm-count belief rule; and restricted-node pending-sign (not needed f
 **The Partials that matter**, in order: ASSETS balance detail (§6) and the ZIP export (§13).
 Everything else is cosmetic or a platform limit.
 
-Fill adjudication (§15) is now **ahead** of native and is queued to be ported back to the APK.
+Fill adjudication (§15) is now **ahead** of native on two counts — true-history verification and
+exclusive evidence — and both are queued to be ported back to the APK.

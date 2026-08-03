@@ -10,7 +10,7 @@ covenant, the same orders, so a MiniDapp user and an APK user trade with each ot
 
 > **This is development software. It moves real funds on mainnet. Use at your own risk.**
 
-MiniDapp `0.3.9` tracks native PandaDEX `0.3.9`.
+MiniDapp `0.4.0` tracks native PandaDEX `0.3.9`.
 
 ## What it does
 

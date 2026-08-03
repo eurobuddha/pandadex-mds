@@ -1,7 +1,7 @@
 /* Pure regression tests; run with `node test.js`. */
 var assert=require("assert"), fs=require("fs"), vm=require("vm");
 global.Decimal=require("./decimal.js");
-["covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
+["covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
 var C={coinid:"0x1",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xabc","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
 var poison=JSON.parse(JSON.stringify(C)); poison.state["3"]="0x00"; assert.strictEqual(PandaDEX.order(poison),null);
@@ -455,7 +455,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   vmmod.createContext(sandbox);
   /* Exactly the list service.js loads, in the same order. */
   ["decimal.js","covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
-   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js"].forEach(function (f) {
+   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js"].forEach(function (f) {
     try { vmmod.runInContext(fsmod.readFileSync(f, "utf8"), sandbox, { filename: f }); }
     catch (error) { throw new Error(f + " cannot load in the MDS service scope: " + error); }
   });
@@ -547,7 +547,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   };
   vmmod.createContext(sandbox);
   ["decimal.js","covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
-   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js"].forEach(function (f) {
+   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js"].forEach(function (f) {
     vmmod.runInContext(fsmod.readFileSync(f, "utf8"), sandbox, { filename:f });
   });
   ADDR = vmmod.runInContext("PandaDEX.ADDR", sandbox);
@@ -615,7 +615,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   };
   vmmod.createContext(sandbox);
   ["decimal.js","covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
-   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js"].forEach(function(f){
+   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js"].forEach(function(f){
     vmmod.runInContext(fsmod.readFileSync(f,"utf8"), sandbox, {filename:f});
   });
   ADDR = vmmod.runInContext("PandaDEX.ADDR", sandbox);
@@ -701,4 +701,58 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
 assert.strictEqual(PandaVerify.proceedsPresent({status:false},"0x00","125",900), false);
 /* A token payout is measured by tokenamount, not the raw minima amount. */
 assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amount:"1",tokenamount:"0.5578",created:900}]),PandaDEX.USDT,"0.5578",900), true);
+/* ---- TRUE HISTORY: read the transaction that spent the coin ----
+   Payout evidence can never recover a fill whose proceeds were already spent onward — and that is
+   the COMMON case for your own orders, because the maker re-spends proceeds to fund the next rung.
+   history records transactions, not the current UTXO set, so it still holds the answer. */
+(function () {
+  var MY = "0x" + "a".repeat(64), eq = function (a, b) { return PandaDEX.d(a).eq(PandaDEX.d(b)); };
+  var askOrder = { coinid:"0xask", wantAddr:MY, locked:PandaDEX.d(1000), lockedTok:"0x00",
+                   wantAmt:PandaDEX.d(5), wantTok:PandaDEX.USDT, created:100 };
+  /* the taker paid what the order asked for */
+  assert.strictEqual(PandaHistory.verdictFor(
+    [{address:MY, tokenid:PandaDEX.USDT, tokenamount:"5"}], askOrder, eq), "FILLED");
+  /* the owner took their own funds back */
+  assert.strictEqual(PandaHistory.verdictFor(
+    [{address:MY, tokenid:"0x00", amount:"1000"}], askOrder, eq), "CANCELLED");
+  /* an output to somebody else's address proves nothing about this order */
+  assert.strictEqual(PandaHistory.verdictFor(
+    [{address:"0x"+"f".repeat(64), tokenid:PandaDEX.USDT, tokenamount:"5"}], askOrder, eq), null);
+  /* wrong amount is not evidence */
+  assert.strictEqual(PandaHistory.verdictFor(
+    [{address:MY, tokenid:PandaDEX.USDT, tokenamount:"4.9"}], askOrder, eq), null);
+  /* a token payout is measured by tokenamount, never the raw minima amount */
+  assert.strictEqual(PandaHistory.verdictFor(
+    [{address:MY, tokenid:PandaDEX.USDT, amount:"1", tokenamount:"5"}], askOrder, eq), "FILLED");
+
+  /* Paging: find the spend, halve on an over-cap page, and never exceed the call budget. */
+  var pages = [], calls = [];
+  function hist(cmd, cb) {
+    calls.push(cmd);
+    var max = Number((cmd.match(/max:(\d+)/) || [])[1] || 0),
+        off = Number((cmd.match(/offset:(\d+)/) || [])[1] || 0);
+    if (max > 4) return cb({ status:true, response:{} });           /* over-cap: no txpows array */
+    if (off === 0) return cb({ status:true, response:{ txpows:[
+      { txpowid:"0xtx1", body:{ txn:{ inputs:[{coinid:"0xother"}], outputs:[] } } },
+      { txpowid:"0xtx2", body:{ txn:{ inputs:[{coinid:"0xask"}],
+        outputs:[{address:MY, tokenid:PandaDEX.USDT, tokenamount:"5"}] } } }
+    ] } });
+    return cb({ status:true, response:{ txpows:[] } });
+  }
+  var out = null;
+  PandaHistory.findSpends(hist, ["0xask"], function (found) { out = found; });
+  assert(out && out["0xask"], "history did not find the transaction that spent the coin");
+  assert.strictEqual(out["0xask"].txpowid, "0xtx2");
+  assert.strictEqual(PandaHistory.verdictFor(out["0xask"].outputs, askOrder, eq), "FILLED");
+  assert(calls.length >= 2 && calls[0].indexOf("max:8") > 0 && calls[1].indexOf("max:4") > 0,
+    "an over-cap page must halve and retry the same offset");
+
+  /* A wallet with no matching history returns nothing rather than guessing, and stays bounded. */
+  var budget = [];
+  PandaHistory.findSpends(function (cmd, cb) {
+    budget.push(cmd);
+    cb({ status:true, response:{ txpows:[{ txpowid:"0xz", body:{ txn:{ inputs:[{coinid:"0xnope"}], outputs:[] } } }] } });
+  }, ["0xmissing"], function (found) { assert.deepStrictEqual(found, {}); });
+  assert(budget.length <= PandaHistory.MAX_FETCHES + 1, "history paging ran past its call budget");
+})();
 console.log("PandaDEX pure tests passed");
