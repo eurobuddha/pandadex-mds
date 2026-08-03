@@ -874,6 +874,18 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   assert.strictEqual(PandaBalance.fundingHint(1, 1, 0, 0), "", "unknown coin counts must not nag");
 })();
 
+/* The balance card is only as true as its last read, and a coin becomes confirmed with no event
+   of its own — core posts NEWBALANCE only when a coin is created or spent, never when an existing
+   one ages past the confirmation depth. Polling on NEWBALANCE alone left proceeds reported as
+   unconfirmed for as long as the page stayed open. */
+(function () {
+  var page = fs.readFileSync("index.html", "utf8"),
+      handler = page.slice(page.indexOf("MDS.init(function"));
+  assert(/event===?"NEWBLOCK"/.test(handler), "the page must re-read balances on NEWBLOCK");
+  assert(handler.indexOf("NEWBALANCE") >= 0, "NEWBALANCE must still trigger a re-read");
+  assert(/NEWBLOCK[^;]*balances\(\)/.test(handler), "NEWBLOCK must reach balances()");
+})();
+
 /* The page must not resurrect the collapsed two-figure model. */
 (function () {
   var page = fs.readFileSync("index.html", "utf8");

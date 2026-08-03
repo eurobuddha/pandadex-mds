@@ -88,6 +88,7 @@ it was read; if it says Partial or No, the gap is named rather than rounded up.
 | Headline value = SENDABLE only, at book mid | **Yes** | `renderAssetsPage()`; was "PORTFOLIO" over free+locked+confirming, which native does not show |
 | Per-asset card: sendable, confirmed, locked, unconfirmed, coins, updated | **Yes** (0.4.4) | `balance.js` + `assetCard()`. Was Available / In orders / **Confirming**, where "Confirming" was `confirmed − sendable` — that is LOCKED, and the node's real `unconfirmed` was never read at all |
 | `updated <ago>` stays honest | **Yes** (0.4.4) | the 1Hz page ticker repaints ASSETS while that pane is open; native repaints on every `repaint()` |
+| Balance re-read every block | **Yes** (0.4.6) | native polls on NEWBLOCK *and* NEWBALANCE (`MainActivity:221`); we polled on NEWBALANCE alone, which core emits only when a coin is created or spent — never when one ages past the confirmation depth |
 | Coin count drives the maker funding warning | **Yes** (0.4.4) | `PandaBalance.fundingHint`, native `makerFundingHint` |
 | Shortfall says why funds are unusable | **Yes** (0.4.4) | `PandaBalance.unavailable`, native `appendUnavailable` |
 | `in PandaDEX orders` from resting orders | **Yes** | `lockedTotals()` |

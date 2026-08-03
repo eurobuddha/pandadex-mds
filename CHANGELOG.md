@@ -3,6 +3,43 @@
 Newest first. Each entry names the native PandaDEX version it reaches parity with, and the specific
 on-chain failure it prevents.
 
+## [0.4.6] — proceeds reported "unconfirmed" for as long as the page stayed open
+
+**Fixed — a stale read, not a stuck coin.** After a sale on 0.4.5 the ASSETS card still showed the
+proceeds as unconfirmed 35 minutes later — roughly 40 blocks. That is not a state the node can be
+in. `unconfirmed` is not a property of a coin: `balance` classifies purely on depth,
+
+```java
+MiniNumber depth = topblock.sub(coin.getBlockCreated());
+if (depth.isLess(confirmations)) { current = unconfirmed; isconfirmed = false; }
+```
+
+(`balance.java:184-195`, default `MINIMA_CONFIRM_DEPTH` 3). A coin becomes confirmed simply by the
+chain moving on — and **nothing is emitted when that happens.** Core posts `NEWBALANCE` only when a
+relevant coin is created or spent:
+
+```java
+if (balancechange) { Main.getInstance().PostMessage(Main.MAIN_BALANCE); }
+```
+
+(`TxPoWTreeNode.java:309`). Ageing past the confirmation depth is not a balance change, so no event
+fires.
+
+The page re-read `balance` only on `NEWBALANCE`. So the read taken the instant a trade's proceeds
+arrived — necessarily at depth 0, necessarily unconfirmed — was the last read it ever took, and the
+card reported that snapshot indefinitely while the money quietly settled and became spendable.
+
+Native has always polled on `NEWBLOCK` as well (`MainActivity:221`), and so does `pandapools-mds`.
+We now do too.
+
+This was never only cosmetic. Everything gated on those figures was reading the same frozen
+snapshot: the wallet strip, the percent buttons, the split-funding check, and the maker's
+affordability guard — which would refuse to publish a ladder for want of funds that had already
+arrived.
+
+**Found by the 0.4.4 age line.** "updated 35m ago" under a figure that should refresh every block
+is what made a stale read legible as a stale read rather than as a stuck trade.
+
 ## [0.4.5] — the export leaves as one archive again
 
 **Fixed — four downloads instead of one file.** Native writes a single
