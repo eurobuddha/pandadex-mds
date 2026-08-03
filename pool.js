@@ -241,6 +241,19 @@ var PandaSynthetic = {};
   Synthetic.CAP_ITERATIONS = 8;
   Synthetic.ROUTER_SLICES = 128;
 
+  /* The binary search revisits amounts, and enforceExecutable re-walks totals capToExecutable
+     already priced. Memoise routes for the duration of one sample() pass — same pools, same side,
+     same amount is the same answer. Cleared on exit so a later pass never sees stale reserves. */
+  Synthetic._routes = null;
+  Synthetic.routeFor = function(pools, askSide, amount) {
+    var key, r;
+    if (!Synthetic._routes) return askSide ? Router.routeExactMinimaOut(pools, amount) : Router.route(pools, true, amount);
+    key = (askSide ? "a" : "b") + P.plain(amount);
+    if (Object.prototype.hasOwnProperty.call(Synthetic._routes, key)) return Synthetic._routes[key];
+    r = askSide ? Router.routeExactMinimaOut(pools, amount) : Router.route(pools, true, amount);
+    Synthetic._routes[key] = r;
+    return r;
+  };
   Synthetic.sample = function(pools, askSide, tick, rows) {
     var out = [], pair = [], i, p, px, quantum, cap, prev = P.d(0), boundary, bucket, cum, band;
     pools = pools || [];
@@ -250,6 +263,8 @@ var PandaSynthetic = {};
     cap = Curve.totalMinima(pair).mul("0.5"); if (!cap.gt(0)) return out;
     quantum = tick ? P.d(tick) : P.d(Synthetic.DEFAULT_TICK);
     if (!quantum.gt(0)) return out;
+    Synthetic._routes = {};
+    try {
     for (i = 1; i <= rows; i++) {
       boundary = askSide ? px.add(quantum.mul(i)) : px.sub(quantum.mul(i));
       bucket = Synthetic.bucketPrice(boundary, askSide, quantum);
@@ -263,6 +278,7 @@ var PandaSynthetic = {};
       if (prev.gte(cap)) break;
     }
     return Synthetic.enforceExecutable(pair, askSide, out);
+    } finally { Synthetic._routes = null; }
   };
 
   /* Snap a band's displayed price onto the tick grid the book itself groups by — asks up, bids
@@ -284,8 +300,8 @@ var PandaSynthetic = {};
     epsilon = amt.div(Synthetic.ROUTER_SLICES).toDecimalPlaces(P.DP, Decimal.ROUND_CEIL);
     if (!epsilon.gt(0)) return null;
     beforeAmt = amt.sub(epsilon); if (beforeAmt.lt(0)) beforeAmt = P.d(0);
-    before = beforeAmt.gt(0) ? (askSide ? Router.routeExactMinimaOut(pools, beforeAmt) : Router.route(pools, true, beforeAmt)) : null;
-    after = askSide ? Router.routeExactMinimaOut(pools, amt) : Router.route(pools, true, amt);
+    before = beforeAmt.gt(0) ? Synthetic.routeFor(pools, askSide, beforeAmt) : null;
+    after = Synthetic.routeFor(pools, askSide, amt);
     if (!after || !after.ok) return null;
     prevM = before && before.ok ? (askSide ? before.totalOut : before.totalIn) : P.d(0);
     prevT = before && before.ok ? (askSide ? before.totalIn : before.totalOut) : P.d(0);
@@ -316,13 +332,31 @@ var PandaSynthetic = {};
 
   /* Shave until the real router can actually fill it at this limit. PandaComposite is resolved at
      call time on purpose: composite.js loads after this file. */
+  /* How much the router would actually move at this limit price.
+     This used to ask PandaComposite.plan with an empty book — but with no orders that router
+     degenerates to exactly this single pool route, after grinding through its 128-slice loop with
+     two full multi-pool routes per slice. 32,768 curve quotes for an answer one route gives in
+     128. Measured, it made the depth ladder take 26 SECONDS for one pool and 53 for three, on
+     every block, on the page's own thread. Native survives the same shape only because Java
+     BigDecimal is far quicker and it runs on a dedicated background thread; here it froze the app. */
+  Synthetic.executableAt = function(pools, askSide, amount, limitPrice) {
+    var r = Synthetic.routeFor(pools, askSide, amount), got, paid, eff;
+    if (!r || !r.ok) return P.d(0);
+    got = P.d(askSide ? r.totalOut : r.totalIn);     /* the MINIMA leg */
+    paid = P.d(askSide ? r.totalIn : r.totalOut);    /* the mxUSDT leg */
+    if (!got.gt(0) || !paid.gt(0)) return P.d(0);
+    if (limitPrice) {
+      eff = paid.div(got);
+      if (askSide ? eff.gt(limitPrice) : eff.lt(limitPrice)) return P.d(0);
+    }
+    return got;
+  };
+  /* Shave until the router can actually fill it at this limit. */
   Synthetic.conservativeExecutable = function(pools, askSide, amount, limitPrice) {
-    var cut = P.d(Synthetic.DISPLAY_DEPTH_CUT), candidate = P.d(amount).sub(cut), i, plan, filled;
+    var cut = P.d(Synthetic.DISPLAY_DEPTH_CUT), candidate = P.d(amount).sub(cut), i, filled;
     if (candidate.lt(0)) candidate = P.d(0);
-    if (typeof PandaComposite === "undefined" || !PandaComposite.plan) return candidate;
     for (i = 0; i < Synthetic.CAP_ITERATIONS && candidate.gt(0); i++) {
-      plan = PandaComposite.plan([], pools, askSide, candidate, limitPrice, 0);
-      filled = P.d(plan && plan.totalMinima || 0);
+      filled = Synthetic.executableAt(pools, askSide, candidate, limitPrice);
       if (filled.gte(candidate)) return candidate;
       candidate = (filled.lt(candidate) ? filled : candidate).sub(cut);
       if (candidate.lt(0)) candidate = P.d(0);

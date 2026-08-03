@@ -3,6 +3,31 @@
 Newest first. Each entry names the native PandaDEX version it reaches parity with, and the specific
 on-chain failure it prevents.
 
+## [0.3.6] — the depth ladder froze the app
+
+**Fixed — 0.3.4 made the app unusable whenever a pool was visible.** Checking that a displayed depth
+band was actually executable asked `PandaComposite.plan` with an empty book. With no orders that
+router degenerates to exactly the single pool route it could have called directly — but only after
+grinding through its 128-slice loop with two full multi-pool routes per slice. That is 32,768 curve
+quotes for an answer one route gives in 128, run up to 8 times per band, for 10 bands, twice, on
+both sides: **over 10 million arbitrary-precision operations per repaint.**
+
+Measured before the fix: **26 seconds for one pool, 53 for three**, on every block, on the page's
+own thread. Native carries the same computation but on a dedicated depth thread with Java
+BigDecimal; here it ran inside the paint.
+
+Three changes:
+- The executability check calls the pool router directly and applies the limit price itself.
+- Routes are memoised for the duration of one sampling pass — the binary search revisits amounts,
+  and the final executability walk re-prices totals the per-band cap already computed.
+- Sampling no longer runs inside the paint. The book renders from the last completed snapshot and
+  recomputes off the paint, repainting the depth columns when the new numbers land — which is what
+  native's background depth worker does. The UI cannot block on it regardless of how long it takes.
+
+Route calls for six pools across both sides went from tens of thousands to **190**, and `test.js`
+now asserts a ceiling on that count, so this class of regression fails the build rather than the
+user's node. Displayed numbers are unchanged.
+
 ## [0.3.5] — phantom trades, a price feed that could never work, and five more
 
 Findings from a full review of the hand-written MDS code. Every fix is pinned by a test.

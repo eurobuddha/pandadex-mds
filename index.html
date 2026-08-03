@@ -1,7 +1,7 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PandaDEX</title><link rel="stylesheet" href="fonts.css"><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="parity.css"></head>
 <body>
-<header class="topbar"><div class="brand"><h1>◆ PANDADEX</h1></div><div class="chrome-pills"><span id="versionPill" class="pill">v0.3.5</span><button id="themePill" class="pill pill-button" onclick="toggleTheme()" aria-label="Toggle theme">☀</button><span id="nodePill" class="pill">PAIRING…</span><span id="blockPill" class="pill"># —</span><button class="icon-button" onclick="send('REFRESH')" aria-label="Refresh">↻</button></div></header>
+<header class="topbar"><div class="brand"><h1>◆ PANDADEX</h1></div><div class="chrome-pills"><span id="versionPill" class="pill">v0.3.6</span><button id="themePill" class="pill pill-button" onclick="toggleTheme()" aria-label="Toggle theme">☀</button><span id="nodePill" class="pill">PAIRING…</span><span id="blockPill" class="pill"># —</span><button class="icon-button" onclick="send('REFRESH')" aria-label="Refresh">↻</button></div></header>
 <main>
   <div id="status" class="notice loading">Connecting to Minima…</div>
   <section class="wallet-strip"><div><label>BLOCK</label><strong id="block">—</strong></div><div><label>MINIMA</label><strong id="minima">—</strong></div><div><label>mxUSDT</label><strong id="usdt">—</strong></div></section>
@@ -36,7 +36,7 @@
   <section id="tapeView" class="view-pane"><div class="section-title"><div><h2>MARKET TRADES</h2><p>Observed fills from this node</p></div></div><div class="tape-head"><span>Time</span><span>Price (mxUSDT)</span><span>Amount (MINIMA)</span></div><div id="tapeRows"></div></section>
 </main>
 <script src="mds.js"></script><script src="decimal.js"></script><script src="covenant.js"></script><script src="book.js"></script><script src="pool.js"></script><script src="composite.js"></script><script src="maker.js"></script><script src="pending.js"></script><script src="export.js"></script><script src="explorer.js"></script><script src="stats.js"></script><script>
-var PANDADEX_VERSION = "0.3.5";
+var PANDADEX_VERSION = "0.3.6";
 var state = {}, balancesState = {}, isBuy = true, gtcOn = true, ordersSub = 0, chartSel = 1, chartSelected = -1, makerHydrated = false, CHARTS = [900000,3600000,14400000,86400000], GROUPS = ["0.00001", "0.0001", "0.001", "0.01"], groupIdx = Number(localStorage.getItem("pandadex_group") || 0);
 function el(id) { return document.getElementById(id); }
 /* HTML-escaping is NOT JS-string escaping. Inside onclick="fn('...')" the parser decodes
@@ -81,19 +81,40 @@ function tradeMid() { var mid=bookMid(), poolMid; if(mid) return mid; try { if(A
    chosen tick, and the pools' own reserves. Native solved the same CPU problem with a background
    depth worker that paints the last completed snapshot; the page has no threads, so on failure we
    keep the previous snapshot rather than blanking the ladder. */
-var depthCache = {key:null, asks:[], bids:[]};
+var depthCache = {key:null, asks:[], bids:[], pending:false};
+/* Sampling pool depth walks the curve and re-plans through the router to prove every band is
+   executable. Even after the 0.3.6 speedups that is hundreds of milliseconds with several pools,
+   and it used to run INSIDE the paint — which froze the whole app for tens of seconds on every
+   block. Native has the same computation but runs it on a dedicated depth thread and paints the
+   last completed snapshot. The page has no threads, so it does the same thing with a deferred
+   task: return whatever was last computed immediately, recompute off the paint, and repaint the
+   book when the new numbers are ready. The UI never blocks on it. */
 function poolDepth(sell) {
-  var pools=Array.isArray(state.pools)?state.pools:[], key, i, p;
-  key=String(state.block||0)+"|"+groupIdx+"|"+pools.length;
-  for(i=0;i<pools.length;i++){p=pools[i]||{};key+="|"+p.address+":"+p.reserveM+":"+p.reserveT;}
-  if(depthCache.key!==key){
-    try {
-      depthCache.asks=PandaSynthetic.sample(pools,true,GROUPS[groupIdx],10);
-      depthCache.bids=PandaSynthetic.sample(pools,false,GROUPS[groupIdx],10);
-      depthCache.key=key;
-    } catch(error) { if(window.console&&console.error) console.error(error); }
+  var pools = Array.isArray(state.pools) ? state.pools : [], key, i, p;
+  key = String(state.block || 0) + "|" + groupIdx + "|" + pools.length;
+  for (i = 0; i < pools.length; i++) { p = pools[i] || {}; key += "|" + p.address + ":" + p.reserveM + ":" + p.reserveT; }
+  if (!pools.length) { depthCache.asks = []; depthCache.bids = []; depthCache.key = key; return []; }
+  if (depthCache.key !== key && !depthCache.pending) {
+    depthCache.pending = true;
+    setTimeout(function () {
+      var asks = [], bids = [];
+      try {
+        asks = PandaSynthetic.sample(pools, true, GROUPS[groupIdx], 10);
+        bids = PandaSynthetic.sample(pools, false, GROUPS[groupIdx], 10);
+      } catch (error) { if (window.console && console.error) console.error(error); }
+      depthCache.asks = asks; depthCache.bids = bids; depthCache.key = key; depthCache.pending = false;
+      renderBookOnly();
+    }, 0);
   }
-  return sell?depthCache.asks:depthCache.bids;
+  return sell ? depthCache.asks : depthCache.bids;
+}
+/* Repaints only the two depth columns. Safe to call from the deferred sampler: by then the cache
+   key matches, so poolDepth returns immediately and cannot schedule another pass. */
+function renderBookOnly() {
+  var rows = Array.isArray(state.book) ? state.book : [];
+  if (!el("asks") || !el("bids")) return;
+  el("asks").innerHTML = renderBookRows(rows, true);
+  el("bids").innerHTML = renderBookRows(rows, false);
 }
 function levelPrice(row) { var price=num(row&&row.price), tick=GROUPS[groupIdx], d, q; if(!price) return null; if(!tick) return price.toDecimalPlaces(6, Decimal.ROUND_HALF_UP); d=dec(tick); q=sellSideFor(row)?price.div(d).ceil():price.div(d).floor(); return q.mul(d); }
 function sellSideFor(row) { return !!row.sell; }
@@ -144,7 +165,7 @@ function chartPriceY(max, min, range, price) { return max.sub(price).div(range).
 function renderChartPage() { var buttons=document.querySelectorAll("#chartPills button"), cs=chartCandles(), plot=el("chartPlot"), i, c, max=null, min=null, range, left, width, high, low, open, close, top, bottom, cls, html=[], volMax=PandaDEX.d(0), volH, tick, price, y, lastY, labelIdx, x, posCls; if(!plot) return; for(i=0;i<buttons.length;i++) buttons[i].className=Number(buttons[i].getAttribute("data-chart"))===chartSel?"active":""; if(!cs.length) { chartSelected=-1; el("chartReadout").textContent=""; plot.innerHTML='<div class="empty-card"><strong>No candles yet</strong><span>Confirmed fills will build the chart from this node forward.</span></div>'; return; } for(i=0;i<cs.length;i++) { c=cs[i]; max=max?Decimal.max(max,c.high):c.high; min=min?Decimal.min(min,c.low):c.low; volMax=Decimal.max(volMax,c.volume); } range=max.sub(min); if(!range.gt(0)) range=PandaDEX.d(1); html.push('<div class="chart-canvas">'); for(i=0;i<5;i++) { tick=PandaDEX.d(i).div(4); price=max.sub(range.mul(tick)); y=tick.mul(100).toNumber(); html.push('<span class="chart-grid" style="top:'+y+'%;"></span><span class="chart-axis-label" style="top:'+y+'%;">'+fmtPrice(price)+'</span>'); } lastY=chartPriceY(max,min,range,cs[cs.length-1].close); html.push('<span class="last-line" style="top:'+lastY+'%;"></span><span class="last-label" style="top:'+lastY+'%;">'+fmtPrice(cs[cs.length-1].close)+'</span>'); width=Math.max(2,90/cs.length); for(i=0;i<cs.length;i++) { c=cs[i]; left=(i*100/cs.length); high=chartPriceY(max,min,range,c.high); low=chartPriceY(max,min,range,c.low); open=chartPriceY(max,min,range,c.open); close=chartPriceY(max,min,range,c.close); top=Math.min(open,close); bottom=Math.max(open,close); cls=c.close.gte(c.open)?"up":"down"; volH=volMax.gt(0)?c.volume.div(volMax).mul(18).toNumber():0; html.push('<button class="candle '+cls+'" onmouseenter="showCandle('+i+')" onfocus="showCandle('+i+')" onclick="showCandle('+i+')" style="left:'+left+'%;width:'+width+'%;"><i style="top:'+high+'%;height:'+Math.max(1,low-high)+'%;"></i><b style="top:'+top+'%;height:'+Math.max(1,bottom-top)+'%;"></b></button>'); html.push('<span class="vol-bar '+cls+'" style="left:'+left+'%;width:'+width+'%;height:'+Math.max(1,volH)+'%;"></span>'); } html.push('</div>'); labelIdx=[0,Math.floor((cs.length-1)/2),cs.length-1]; for(i=0;i<labelIdx.length;i++) { x=cs.length===1?50:(labelIdx[i]*100/(cs.length-1)); posCls=i===0?" first":(i===2?" last":""); html.push('<span class="time-label'+posCls+'" style="left:'+x+'%;">'+chartTime(cs[labelIdx[i]].openMs, CHARTS[chartSel]===86400000)+'</span>'); } plot.innerHTML=html.join(""); showCandle(chartSelected>=0&&chartSelected<cs.length?chartSelected:cs.length-1); }
 function renderAllPages() { renderOrdersPage(); renderAssetsPage(); renderTapePage(); renderChartPage(); renderMakerPage(); }
 function renderTicker() { var s=state.stats||{}, lf=s.lastFill, ch=s.changePct===null||s.changePct===undefined?null:num(s.changePct), up; el("syncDot").textContent=state.ready?"● live":"● syncing"; el("syncDot").className=state.ready?"in":""; if(lf&&lf.price!==undefined){el("lastPrice").textContent=fmtPrice(lf.price); el("lastPrice").className=""; el("priceKind").textContent="last trade · "+ago(lf.ageMs); } else { el("lastPrice").textContent="—"; el("lastPrice").className=""; el("priceKind").textContent="no trades observed yet"; } if(ch){ up=ch.gte(0); el("delta").textContent=(up?"+":"")+ch.toFixed(2)+"%"; el("delta").className=up?"in":"out"; } else { el("delta").textContent=""; el("delta").className=""; } el("high24").textContent=s.high?fmtPrice(s.high):"—"; el("low24").textContent=s.low?fmtPrice(s.low):"—"; el("vol24").textContent=s.volume?fmt(s.volume):"—"; }
-function render() { var rows=Array.isArray(state.book)?state.book:[], mine=Array.isArray(state.mine)?state.mine:[], mid, status; updateChrome(); el("block").textContent=state.block || "—"; renderTicker(); mid=tradeMid(); el("asks").innerHTML=renderBookRows(rows,true); el("bids").innerHTML=renderBookRows(rows,false); el("spread").textContent=mid?fmtPrice(mid):"—"; el("mine").innerHTML=renderOrders(mine); renderAllPages(); status=state.stage || (state.ready?"Live V5 book · block "+(state.block || "—"):"Starting PandaDEX…"); notice(status,state.stage?"pending":(state.ready?"live":"loading")); }
+function render() { var rows=Array.isArray(state.book)?state.book:[], mine=Array.isArray(state.mine)?state.mine:[], mid, status; updateChrome(); el("block").textContent=state.block || "—"; renderTicker(); mid=tradeMid(); renderBookOnly(); el("spread").textContent=mid?fmtPrice(mid):"—"; el("mine").innerHTML=renderOrders(mine); renderAllPages(); status=state.stage || (state.ready?"Live V5 book · block "+(state.block || "—"):"Starting PandaDEX…"); notice(status,state.stage?"pending":(state.ready?"live":"loading")); }
 function balances() { MDS.cmd("balance",function(result) { var rows=result && result.response || [], i, row, confirmed, sendable; rows=Array.isArray(rows)?rows:(rows?[rows]:[]); for(i=0;i<rows.length;i++) { row=rows[i]||{}; confirmed=dec(row.confirmed); sendable=dec(row.sendable!==undefined?row.sendable:row.confirmed); if(row.tokenid==="0x00") { balancesState.minimaFree=sendable; balancesState.minimaConfirming=confirmed.sub(sendable); el("minima").textContent=sendable.toFixed(); } if(PandaDEX.eqTok(row.tokenid,PandaDEX.USDT)) { balancesState.usdtFree=sendable; balancesState.usdtConfirming=confirmed.sub(sendable); el("usdt").textContent=sendable.toFixed(); } } renderAssetsPage(); }); }
 applyTheme(); updateChrome();
 MDS.init(function(message) { var packet; if(message.event==="inited") { mergeTrade(); restyleGroups(); balances(); send("REFRESH"); chooseSide(true); } else if(message.event==="NEWBALANCE") balances(); else if(message.event==="MDSCOMMS" && commPrivate(message)) { try { packet=commPacket(message); if(!packet||packet.origin!=="service") return; if(packet.type==="STATE") { state=packet.data||{}; render(); } else if(packet.type==="ERROR") notice(packet.data&&packet.data.message?packet.data.message:"Service error","error"); else if(packet.type==="POSTED") notice(packet.data&&packet.data.message?packet.data.message:"Posted","posted"); } catch(error) { if(window.console&&console.error) console.error(error); notice("Service update render error: "+(error&&error.message?error.message:error),"error"); } } });

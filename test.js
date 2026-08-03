@@ -115,6 +115,28 @@ var sCap=PandaCurve.totalMinima([dSmall]).mul("0.5");
   for(j=0;j<rows.length;j++){ running=running.add(rows[j].poolMinima);
     assert(PandaDEX.d(PandaComposite.plan([],[dSmall],cfg[1],running,rows[j].price,0).totalMinima).gte(running)); }
 });
+/* COST CEILING. Sampling depth used to ask PandaComposite.plan whether each band was executable —
+   and with an empty book that router degenerates to the single pool route this now calls directly,
+   after grinding through its 128-slice loop with two multi-pool routes per slice. Measured at 26
+   SECONDS for one pool and 53 for three, on every block, on the page's own thread: the app froze.
+   Counting routes rather than milliseconds keeps this deterministic across machines. */
+var routeCount = 0, realRoute = PandaPoolRouter.route, realExact = PandaPoolRouter.routeExactMinimaOut;
+PandaPoolRouter.route = function(a,b,c){ routeCount++; return realRoute(a,b,c); };
+PandaPoolRouter.routeExactMinimaOut = function(a,b){ routeCount++; return realExact(a,b); };
+var costPools = [];
+for (var cp = 0; cp < 6; cp++) costPools.push({address:"0xcp"+cp,opk:"0xk",oadr:"0xo",tok:PandaDEX.USDT,kmin:"0",
+  reserveM:String(2000+cp*500),reserveT:String(10+cp*2),coinidM:"0xcm"+cp,coinidT:"0xct"+cp,tokDecimals:8,covenantScript:"S"});
+PandaSynthetic.sample(costPools,true,"0.0001",10);
+PandaSynthetic.sample(costPools,false,"0.0001",10);
+assert(routeCount > 0);
+assert(routeCount < 1200, "synthetic depth cost regressed: " + routeCount + " routes for 6 pools");
+/* The memo must actually be doing something — an uncached pass repeats amounts constantly. */
+PandaSynthetic._routes = null;
+var uncached = 0; routeCount = 0;
+PandaSynthetic.sample(costPools,true,"0.0001",10);
+uncached = routeCount;
+assert(uncached > 0);
+PandaPoolRouter.route = realRoute; PandaPoolRouter.routeExactMinimaOut = realExact;
 /* A pool with no liquidity, no rows requested, or a nonsense tick yields nothing rather than throwing. */
 assert.deepStrictEqual(PandaSynthetic.sample([],true,"0.001",6),[]);
 assert.deepStrictEqual(PandaSynthetic.sample([dSmall],true,"0.001",0),[]);
