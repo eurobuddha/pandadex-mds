@@ -138,6 +138,19 @@ var PandaExport = PandaExport || {};
   };
 
   /* One call for the whole export. The caller only has to deliver the bytes. */
+  /* native TradeExport.filename — one archive, dated in UTC so exports from two devices sort. */
+  X.zipName = function (ms) {
+    var d = new Date(Number(ms) || 0), p = function (n) { return (n < 10 ? "0" : "") + n; };
+    return "pandadex-trades-" + d.getUTCFullYear() + "-" + p(d.getUTCMonth() + 1) + "-" + p(d.getUTCDate()) + ".zip";
+  };
+
+  /* native TradeExportWriter.describe — the confirmation line after a successful export. */
+  X.describe = function (rows) {
+    var t = X.totals(rows);
+    return t.fills + " confirmed personal trade" + (t.fills === 1 ? "" : "s")
+      + " · net " + t.netMinima.toFixed() + " MINIMA · net " + t.netUsdt.toFixed() + " mxUSDT";
+  };
+
   X.files = function (rows, meta) {
     return [
       {name:"summary.txt", text:X.summaryText(rows, meta)},

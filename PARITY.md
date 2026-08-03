@@ -195,7 +195,7 @@ running. Native survives the phone sleeping; this cannot. That is a platform lim
 | summary + confirmed_trades + reconciliation + verification | **Yes** | `export.js` |
 | Notional cut down, never overstated | **Yes** | `export.js` |
 | Formula-injection guard | **Yes** | beyond native — native has no guard |
-| Delivered as one ZIP | **Partial** | Four separate downloads; no ZIP library available |
+| Delivered as one ZIP | **Yes** (0.4.5) | `zip.js` writes the archive directly (STORED entries, no ZIP64) — `pandadex-trades-<date>.zip`, native's four files in native's order |
 | Explorer txpow verification | **Yes** | `explorer.js` |
 
 ## 14. Own-trade recording — CLOSED in 0.3.9
@@ -268,7 +268,7 @@ at. Market-tape completeness only.
 **The four real absences:** ticker pulse animation; persisted book cache / cold-start paint; the
 book's confirm-count belief rule; and restricted-node pending-sign (not needed for a WRITE dapp).
 
-**The Partials that matter**, in order: the ZIP export (§13) — the ASSETS balance detail closed in 0.4.4.
+**No Partials remain that move money or state.** The ASSETS balance detail closed in 0.4.4 and the ZIP export in 0.4.5; what is left is cosmetic (§2 ticker pulse animation, §4 cold-start book paint from cache).
 Everything else is cosmetic or a platform limit.
 
 Fill adjudication (§15) is now **ahead** of native on two counts — true-history verification and

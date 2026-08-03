@@ -1,7 +1,7 @@
 /* Pure regression tests; run with `node test.js`. */
 var assert=require("assert"), fs=require("fs"), vm=require("vm");
 global.Decimal=require("./decimal.js");
-["covenant.js","balance.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
+["covenant.js","balance.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js","zip.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
 var C={coinid:"0x1",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xabc","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
 var poison=JSON.parse(JSON.stringify(C)); poison.state["3"]="0x00"; assert.strictEqual(PandaDEX.order(poison),null);
@@ -881,6 +881,88 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
     assert(page.indexOf(dead) < 0, "index.html still uses the removed balance field " + dead);
   });
   assert(page.indexOf("balance.js") >= 0, "index.html must load balance.js");
+})();
+
+/* ---- The export leaves as ONE archive (native TradeExportWriter).
+   A hand-written ZIP is only worth having if it is a real ZIP, so this does not inspect our own
+   bytes with our own reader — it hands the archive to the system `unzip`, which is the same
+   unrelated implementation the user's machine will open it with. */
+(function () {
+  var cp = require("child_process"), os = require("os"), path = require("path"),
+      rows, files, at, bytes, dir, file, listed, i, big;
+
+  at = Date.UTC(2026, 7, 3, 14, 30, 20);
+  assert.strictEqual(PandaExport.zipName(at), "pandadex-trades-2026-08-03.zip");
+  assert.strictEqual(PandaExport.zipName(Date.UTC(2026, 0, 9, 0, 0, 0)), "pandadex-trades-2026-01-09.zip",
+    "single-digit month and day must be zero-padded");
+
+  rows = [
+    {timems:at - 5000, price:"2.5", size:"4", buy:true,  coinid:"0xa", txpowid:"0xt1", verified:"CHAIN"},
+    {timems:at - 3000, price:"2.0", size:"1", buy:false, coinid:"0xb", txpowid:"0xt2", verified:"CHAIN"}
+  ];
+  files = PandaExport.files(rows, {version:"0.4.5", address:"MxTEST", block:1234});
+  assert.strictEqual(files.length, 4);
+
+  bytes = PandaZip.build(files, at);
+  assert(bytes.length > 0);
+  assert.strictEqual(bytes[0], 0x50); assert.strictEqual(bytes[1], 0x4B);   /* "PK" */
+
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), "pandadex-zip-"));
+  file = path.join(dir, "export.zip");
+  fs.writeFileSync(file, Buffer.from(bytes));
+
+  /* -t verifies every entry's CRC — a wrong checksum is exactly the failure a hand-rolled writer
+     makes, and it would only surface when the user tried to open the file. */
+  cp.execFileSync("unzip", ["-t", file], {stdio:"pipe"});
+
+  listed = cp.execFileSync("unzip", ["-Z1", file], {encoding:"utf8"}).trim().split("\n");
+  assert.deepStrictEqual(listed,
+    ["summary.txt", "confirmed_trades.csv", "reconciliation.csv", "verification.csv"],
+    "archive must hold native's four files, in native's order");
+
+  /* Round-trip every entry: content must survive byte-for-byte, including non-ASCII. */
+  for (i = 0; i < files.length; i++) {
+    assert.strictEqual(cp.execFileSync("unzip", ["-p", file, files[i].name], {encoding:"utf8"}),
+      files[i].text, "entry did not round-trip: " + files[i].name);
+  }
+
+  /* The summary carries "·" and "≈"; a broken UTF-8 encoder would corrupt them silently. */
+  big = PandaZip.build([{name:"u.txt", text:"a · b ≈ c é 🐼 end"}], at);
+  fs.writeFileSync(file, Buffer.from(big));
+  cp.execFileSync("unzip", ["-t", file], {stdio:"pipe"});
+  assert.strictEqual(cp.execFileSync("unzip", ["-p", file, "u.txt"], {encoding:"utf8"}),
+    "a · b ≈ c é 🐼 end", "multi-byte and surrogate-pair text must round-trip");
+
+  /* A lone surrogate must become U+FFFD rather than an invalid byte that breaks the archive. */
+  assert.deepStrictEqual(PandaZip.utf8("\ud800"), [0xEF, 0xBF, 0xBD]);
+  assert.deepStrictEqual(PandaZip.utf8(""), []);
+
+  /* Known-answer CRC32, so a table regression cannot pass by agreeing with itself. */
+  assert.strictEqual(PandaZip.crc32(PandaZip.utf8("123456789")), 0xCBF43926);
+
+  /* No entries must still be a well-formed archive — the bare 22-byte end-of-central-directory —
+     rather than a zero-byte file. (`unzip -t` exits 1 on an empty archive by design, so this one
+     is checked structurally.) */
+  assert.strictEqual(PandaZip.build([], at).length, 22);
+
+  /* Pre-1980 cannot be represented in a DOS date field; clamp rather than emit something unzip
+     rejects, because a node with no clock set reports 1970. */
+  fs.writeFileSync(file, Buffer.from(PandaZip.build([{name:"a.txt", text:"x"}], 0)));
+  cp.execFileSync("unzip", ["-t", file], {stdio:"pipe"});
+
+  fs.rmSync(dir, {recursive:true, force:true});
+
+  assert(PandaExport.describe(rows).indexOf("2 confirmed personal trades") === 0);
+  assert.strictEqual(PandaExport.describe([rows[0]]).indexOf("1 confirmed personal trade ·"), 0,
+    "a single trade must not be pluralised");
+})();
+
+/* The page must send one archive, not four downloads. */
+(function () {
+  var page = fs.readFileSync("index.html", "utf8");
+  assert(page.indexOf("zip.js") >= 0, "index.html must load zip.js");
+  assert(page.indexOf("PandaZip.build") >= 0, "downloadExport must build the archive");
+  assert(page.indexOf("saveTextFile") < 0, "the per-file download path must be gone");
 })();
 
 console.log("PandaDEX pure tests passed");

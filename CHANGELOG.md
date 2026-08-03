@@ -3,6 +3,33 @@
 Newest first. Each entry names the native PandaDEX version it reaches parity with, and the specific
 on-chain failure it prevents.
 
+## [0.4.5] — the export leaves as one archive again
+
+**Fixed — four downloads instead of one file.** Native writes a single
+`pandadex-trades-<date>.zip` holding `summary.txt`, `confirmed_trades.csv`, `reconciliation.csv`
+and `verification.csv` (`TradeExportWriter`). The MiniDapp fired four separate browser downloads:
+four save prompts, four loose files in Downloads, and four parts that can drift away from each
+other. That last one is the reason it matters — the reconciliation CSV means nothing without the
+summary stating the window, wallet and balances it reconciles against.
+
+There is no ZIP library in the page and no CDN to pull one from (a MiniDapp is served from the node
+and must be self-contained), so `zip.js` writes the format directly. Two decisions keep that small:
+
+- entries are **STORED**, not deflated, so the entire compression half of the format is simply not
+  implemented — an export is a few KB of CSV and compression would only buy complexity;
+- **no ZIP64**, guarded rather than assumed: `build()` refuses past 4GB instead of emitting an
+  archive with silently truncated offsets.
+
+The writer is pure — the export timestamp is passed in — so the same trades always produce
+byte-identical output. It is tested by handing the archive to the system `unzip`: `-t` to verify
+every entry's CRC (the failure a hand-rolled writer actually makes, and one that would only surface
+when the user tried to open the file), then `-p` on each entry to prove the contents round-trip
+byte-for-byte, including the `·`, `≈` and non-BMP characters that a broken UTF-8 encoder would
+corrupt silently.
+
+The confirmation line now matches native's too: `2 confirmed personal trades · net 3 MINIMA ·
+net −6.5 mxUSDT` rather than a count of files written.
+
 ## [0.4.4] — the ASSETS card was telling you money was confirming when it was locked
 
 **Fixed — a wrong figure under a wrong label.** The per-asset card showed *Available / In orders /
