@@ -854,7 +854,8 @@ PDService.retryKeysIfStale = function() {
 PDService.boot = function() {
   /* Give the signing gate its durable layer. Without this it still serialises correctly inside
      this context; with it, a lock survives a service restart mid-chain and frees itself by TTL. */
-  PandaSignLock.use(MDS.sql);
+  /* The signing gate is a plain in-process queue now — nothing to inject, and deliberately so:
+     holding MDS.sql by reference detached a Java method and broke every signing path. */
   /* Let the transaction layer narrate. Without this the UI shows one line for the whole chain. */
   PandaTxn.stage = function(message) { PDService.setStage(message); };
   PDService.cmd("runscript script:" + PDService.scriptArg(), function(scriptResult) {

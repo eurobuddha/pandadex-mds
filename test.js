@@ -208,17 +208,20 @@ assert.strictEqual(gateMaxOpen,1);                                        /* nev
 assert.strictEqual(PandaSignLock.busy(),false);assert.strictEqual(PandaSignLock.queued(),0);
 var gateRuns=0;PandaSignLock.gate("d",function(release){gateRuns++;release.free();});
 assert.strictEqual(gateRuns,1);                                           /* empty queue runs immediately, once */
-/* A chain that throws must free the gate, not strand it until the watchdog fires. */
-PandaSignLock.gate("boom",function(){throw new Error("chain blew up");});
+/* A chain that throws must free the gate AND surface the error. Swallowing it is exactly how three
+   separate signing outages stayed invisible; the service wraps actions and reports instead. */
+var gateThrew=false;
+try { PandaSignLock.gate("boom",function(){throw new Error("chain blew up");}); }
+catch (error) { gateThrew=true; }
+assert(gateThrew,"a throwing chain must not be swallowed by the gate");
+assert.strictEqual(PandaSignLock.busy(),false,"a throwing chain left the gate held");
 var gateAfter=false;PandaSignLock.gate("after",function(release){gateAfter=true;release.free();});
-assert(gateAfter);
-/* With the durable layer injected, the claim is an INSERT whose primary-key violation IS the
-   "someone else holds it" signal, and the release is the matching DELETE. */
-var sqlLog=[];PandaSignLock.use(function(query,cb){sqlLog.push(query);cb({status:true});});
-PandaSignLock.gate("dex",function(release){release.free();});
-assert(sqlLog.some(function(q){return q.indexOf("INSERT INTO `sign_lock`")===0;}));
-assert(sqlLog.some(function(q){return q.indexOf("DELETE FROM `sign_lock` WHERE `id`=1")===0;}));
-PandaSignLock.use(null);
+assert(gateAfter,"the queue did not continue after a throwing chain");
+/* There is no durable layer any more, and that is the point: it guarded against a second signing
+   CONTEXT this app does not have (the page never loads signlock.js), it cost five SQL round-trips
+   per transaction, and holding MDS.sql by reference detached a Java method and broke signing
+   outright. Native's SignGate is a plain in-process queue too. */
+assert.strictEqual(PandaSignLock.queued(),0);
 /* Every signing path funnels through the gate: the txnsign chains AND the bare `send` that
    creates an order, because `send` signs internally too. */
 calls=[];var gatedDuring=null;
@@ -438,19 +441,36 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
 (function () {
   var vmmod = require("vm"), fsmod = require("fs");
   var sqlLog = [];
+  /* A Java-hosted method REJECTS a wrong receiver:
+       Java method "sql" was invoked with [object Object] as "this" value
+     A plain JS mock does not, which is why `PandaSignLock.use(MDS.sql)` — a detached Java method —
+     passed every test and then broke every signing path on the node. Model the bridge, not a
+     convenient approximation of it. */
+  function hostMethod(owner, name, impl) {
+    return function () {
+      if (this !== owner) throw new Error('Java method "' + name + '" was invoked with [object Object] as "this" value');
+      return impl.apply(this, arguments);
+    };
+  }
   var sandbox = {
     /* exactly what Rhino's initStandardObjects() provides, and nothing else */
     Object: Object, Array: Array, Function: Function, String: String, Number: Number,
     Boolean: Boolean, Date: Date, Math: Math, JSON: JSON, RegExp: RegExp, Error: Error,
     TypeError: TypeError, RangeError: RangeError,
     isNaN: isNaN, isFinite: isFinite, parseInt: parseInt, parseFloat: parseFloat,
-    MDS: {
-      sql: function (q, cb) { sqlLog.push(q); if (cb) cb({ status: true, rows: [] }); },
-      cmd: function (c, cb) { if (cb) cb({ status: true, response: {} }); },
-      log: function () {}, notify: function () {},
-      net: { GET: function (u, cb) { if (cb) cb({ status: false }); } },
-      comms: { solo: function (m, cb) { if (cb) cb(); } }
-    }
+    MDS: (function () {
+      var mds = {}, net = {}, comms = {};
+      mds.sql = hostMethod(mds, "sql", function (q, cb) { sqlLog.push(q); if (cb) cb({ status: true, rows: [] }); });
+      mds.cmd = hostMethod(mds, "cmd", function (c, cb) { if (cb) cb({ status: true, response: {} }); });
+      mds.log = hostMethod(mds, "log", function () {});
+      mds.notify = hostMethod(mds, "notify", function () {});
+      mds.load = hostMethod(mds, "load", function () {});
+      /* MDS.net.GET binds `this` to NETService, not to MDS — its own owner. */
+      net.GET = hostMethod(net, "GET", function (u, cb) { if (cb) cb({ status: false }); });
+      comms.solo = hostMethod(comms, "solo", function (m, cb) { if (cb) cb(); });
+      mds.net = net; mds.comms = comms;
+      return mds;
+    })()
   };
   vmmod.createContext(sandbox);
   /* Exactly the list service.js loads, in the same order. */
@@ -474,8 +494,10 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   assert.strictEqual(parsed.ran, 1, "the signing work function never ran in the MDS service scope");
   assert.strictEqual(parsed.busy, false, "the signing gate was not released");
   assert.strictEqual(parsed.queued, 0);
-  assert(sqlLog.some(function (q) { return q.indexOf("INSERT INTO `sign_lock`") === 0; }));
-  assert(sqlLog.some(function (q) { return q.indexOf("DELETE FROM `sign_lock` WHERE `id`=1") === 0; }));
+  /* The gate must touch NO database at all — a durable lock row was never needed here and the
+     detached MDS.sql it required is what broke signing on the node. */
+  assert(!sqlLog.some(function (q) { return q.indexOf("sign_lock") >= 0; }),
+    "the signing gate is still talking to the database");
   /* Two operations still serialise, and the second only runs when the first releases. */
   var serial = vmmod.runInContext(
     "PandaSignLock.reset();" +
@@ -490,6 +512,17 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   assert.strictEqual(s2.mid, "a", "two signing operations ran concurrently");
   assert.strictEqual(s2.end, "a,b");
   /* And no service module may reference a browser global at all. */
+  /* A host method must be CALLED on its owner, never passed or stored. Detaching one is invisible
+     under Node and fatal on the node. */
+  ["signlock.js","price.js","txn.js","service.js","tape.js","pool.js","composite.js","book.js",
+   "covenant.js","maker.js","verifier.js","pending.js","stats.js","split.js","history.js"].forEach(function (f) {
+    var src = fsmod.readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+    /* `if (MDS.notify)` and `typeof MDS.log` are existence checks, not detachments — strip them
+       before looking for a host method being passed as an argument or assigned to a variable. */
+    src = src.replace(/\b(?:if|while|typeof|return)\s*\(?\s*MDS\.[a-z]+(\.[A-Za-z]+)?/g, " ");
+    var detached = src.match(/[(,=]\s*MDS\.[a-z]+(\.[A-Za-z]+)?\s*[,);]/g);
+    assert(!detached, f + " passes a host method by reference (" + detached + ") — call it on its owner instead");
+  });
   ["signlock.js","price.js","txn.js","service.js","tape.js","pool.js","composite.js","book.js",
    "covenant.js","maker.js","verifier.js","pending.js","stats.js","split.js"].forEach(function (f) {
     /* Strip comments first — this file's own header names the globals it must not use. */

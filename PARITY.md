@@ -1,7 +1,7 @@
 # Parity audit — PandaDEX MiniDapp vs native PandaDEX
 
 Native reference: `apks/pandadex` **0.3.9** (50 classes, 27 test classes).
-MiniDapp audited: **0.4.0**.
+MiniDapp audited: **0.4.1**.
 
 Every row was checked by reading both sides. Status is one of **Yes** (behaviour matches),
 **Partial** (present but differs — the difference is stated), **No** (absent), or **N/A**
@@ -110,7 +110,7 @@ it was read; if it says Partial or No, the gap is named rather than rounded up.
 
 | Behaviour | Status | Evidence / gap |
 |---|---|---|
-| Serial signing gate over every signing path | **Yes** | `signlock.js`, timer-free |
+| Serial signing gate over every signing path | **Yes** | `signlock.js` — a plain in-process FIFO with a lost-callback watchdog, matching `SignGate.java` exactly. No timers and no database: the service scope has neither, and a durable lock row guarded against a second signing context this app does not have |
 | `txncheck` as sole verdict (`valid.scripts`, `validamounts`, `mmrproofs`, `allsignaturesvalid`) | **Yes** | `txn.js` `checkPost` |
 | `txndelete` on every terminal path | **Yes** | `checkPost` |
 | Transaction size gate before validation | **Yes** | `txnexport`, 60KB |
