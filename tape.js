@@ -3,7 +3,10 @@ var PandaTape = PandaTape || {};
   T.MISS_GRACE = 2;
   T.MISS_GRACE_SUSPECT = 4;
   T.MAX_VANISH_PER_SCAN = 2;
-  T.VANISH_AGE = P.SCAN_DEPTH - 80;
+  /* Coins this old have aged out of the node tree, so their disappearance proves nothing.
+     Derived from the node visibility HORIZON as native does; deriving it from SCAN_DEPTH made
+     it move whenever the scan window changed, which is unrelated. */
+  T.VANISH_AGE = P.HORIZON - 80;
   T.STALE_PREV_MS = 4 * 60 * 1000;
   T.esc = function (v) { return String(v).replace(/'/g, "''"); };
   T.identity = function (o) { return o.orderId + "|" + o.ownerPk + "|" + o.wantAddr + "|" + (o.sell ? "s" : "b"); };
@@ -85,8 +88,11 @@ var PandaTape = PandaTape || {};
   };
   T.init = function (done) {
     MDS.sql("CREATE TABLE IF NOT EXISTS `market_tape` (`spentcoin` varchar(160) PRIMARY KEY, `timems` bigint, `block` bigint, `price` varchar(80), `size` varchar(80), `buy` int, `partial` int, `mine` int)", function () {
+      /* Every tape, candle and 24h-stats read orders by timems over up to 8000 rows. */
+      MDS.sql("CREATE INDEX IF NOT EXISTS `tape_time` ON `market_tape`(`timems`)", function () {
       MDS.sql("CREATE TABLE IF NOT EXISTS `my_trades` (`spentcoin` varchar(160) PRIMARY KEY, `timems` bigint, `block` bigint, `price` varchar(80), `size` varchar(80), `buy` int, `maker` int, `orderid` varchar(160))", function () {
         T.migrateEvidence(done);
+      });
       });
     });
   };

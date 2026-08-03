@@ -157,14 +157,26 @@ PDService.recordFill = function() {
       PDService.loadTape(function() { PDService.snapshot(); });
     });
 };
+/* A PARTIAL fill proves itself: the successor coin carrying the remainder is on-chain evidence
+   that a fill happened and for exactly how much. A FULL disappearance proves nothing on its own —
+   it is equally consistent with a fill, someone else's cancel, or a coin we simply failed to read.
+   So only positive payout evidence may be recorded, and UNKNOWN is DROPPED.
+
+   This previously recorded UNKNOWN as a fill, which is the phantom-trade bug native lists as a
+   fixed critical issue. PandaVerify returns UNKNOWN for any unreadable reply, so a single node
+   hiccup was enough to write a trade that never happened into the tape, the candles, the 24h
+   stats, my_trades, the P&L and the accounting export. A lost trade is invisible to the user; a
+   phantom one is not. */
 PDService.recordObservedFill = function(spentCoin, order, size, price, takerBuy, partial) {
+  if (partial) return PDService.storeObservedFill(spentCoin, order, size, price, takerBuy, true);
+  PandaVerify.verify(PDService.cmd, order, PDService.block, function(verdict) {
+    if (verdict === PandaVerify.CANCELLED) { PDService.cancelled[spentCoin] = true; return; }
+    if (verdict !== PandaVerify.FILLED) return;
+    PDService.storeObservedFill(spentCoin, order, size, price, takerBuy, false);
+  });
+};
+PDService.storeObservedFill = function(spentCoin, order, size, price, takerBuy, partial) {
   var mine = PDService.owns(order);
-  if (!partial) {
-    return PandaVerify.verify(PDService.cmd, order, PDService.block, function(verdict) {
-      if (verdict === PandaVerify.CANCELLED) { PDService.cancelled[spentCoin] = true; return; }
-      PDService.recordObservedFill(spentCoin, order, size, price, takerBuy, true);
-    });
-  }
   PandaTape.addFill({spentcoin:spentCoin, timems:Date.now(), block:PDService.block, price:price,
     size:size, buy:takerBuy, partial:partial === true && size.lt(order.minima), mine:mine}, function() {
     if (mine) {
@@ -585,10 +597,10 @@ PDService.refresh = function() {
   PDService.scanning = true;
   PDService.rescan = false;
   PandaPrice.refreshAsync();
-  PandaBook.scan(PDService.cmd, function(error, book, incomplete) {
+  PandaBook.scan(PDService.cmd, function(book, incomplete) {
     var resolved, i, msg, changed, visibleBook;
     PDService.scanning = false;
-    if (error) { PDService.tell("ERROR", {message:error + (incomplete ? " (keeping last good book)" : "")}); if (PDService.rescan) PDService.refresh(); return; }
+    if (incomplete) PDService.tell("ERROR", {message:"Part of the order book could not be read" + (PDService.book.length ? " — keeping the last good book" : "")});
     visibleBook = incomplete && PDService.book.length ? PDService.book : book;
     if (PDService.diff) PandaTape.ingest(PDService.diff, visibleBook, incomplete, PDService.block, {onFill:PDService.recordObservedFill});
     PDService.book = visibleBook;
@@ -780,7 +792,7 @@ PDService.action = function(message) {
       PDService.fillCoins = [];
       for (i = 0; i < plan.takes.length; i++) PDService.fillCoins.push(plan.takes[i].order.coinid);
       PDService.fillBlock = PDService.block;
-      PDService.fillMeta = {spentcoin:plan.takes[0].order.coinid, price:plan.average, size:plan.totalMinima, buy:!!data.buy};
+      PDService.fillMeta = {spentcoin:plan.takes[0].order.coinid, price:PandaDEX.plain(plan.average), size:PandaDEX.plain(plan.totalMinima), buy:!!data.buy};
       PDService.refresh();
     });
   }

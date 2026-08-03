@@ -46,25 +46,46 @@ var PandaPrice = PandaPrice || {};
     }
     return 0;
   };
+  /* This module runs in the SERVICE, which is Rhino with a Java-backed MDS injected — there is no
+     XMLHttpRequest there. Using one meant every fetch threw, was swallowed, and the feed reported
+     "network error" forever: mid stayed 0, mustWithdraw() stayed true, pegged ladders could never
+     be published and an armed one would be auto-withdrawn off the book. MDS.net.GET is the
+     transport the service actually has (MDSJS exposes `net` as a public field).
+
+     The reply body arrives as a string, base64, or an already-parsed object depending on the node,
+     so it is normalised the way pandapools-mds does. And MDS.net.GET can fail to call back at all,
+     hence the watchdog — without it a lost callback would wedge the feed until restart. */
+  X.NET_TIMEOUT_MS = 10000;
+  X.MAX_BODY = 16384;
+  X.parseBody = function (res) {
+    var b;
+    if (!res || res.status === false) return null;
+    b = res.response;
+    if (b && typeof b === "object" && b.data !== undefined && b.data !== null) b = b.data;
+    if (typeof b === "string") {
+      if (b.length > X.MAX_BODY) b = b.substring(0, X.MAX_BODY);
+      try { return JSON.parse(b); } catch (e1) {
+        try { return JSON.parse(typeof atob === "function" ? atob(b) : b); } catch (e2) { return null; }
+      }
+    }
+    return b && typeof b === "object" ? b : null;
+  };
   X.http = function (url, done) {
-    var xhr, called = false;
-    function finish(err, json) { if (called) return; called = true; done(err, json); }
+    var called = false, timer;
+    function finish(err, json) {
+      if (called) return;
+      called = true;
+      if (timer) { try { clearTimeout(timer); } catch (ignore) {} }
+      done(err, json);
+    }
     try {
-      xhr = new XMLHttpRequest();
-      xhr.open("GET", url, true);
-      xhr.timeout = 10000;
-      xhr.onreadystatechange = function () {
-        var body, json;
-        if (xhr.readyState !== 4) return;
-        if (xhr.status < 200 || xhr.status >= 300) return finish("HTTP " + xhr.status);
-        body = xhr.responseText || "";
-        if (body.length > 16384) body = body.substring(0, 16384);
-        try { json = JSON.parse(body); } catch (e) { return finish("bad JSON"); }
+      timer = setTimeout(function () { finish("timeout"); }, X.NET_TIMEOUT_MS);
+      if (timer && timer.unref) timer.unref();
+      MDS.net.GET(url, function (res) {
+        var json = X.parseBody(res);
+        if (!json) return finish(res && res.status === false ? "network error" : "bad JSON");
         finish(null, json);
-      };
-      xhr.onerror = function () { finish("network error"); };
-      xhr.ontimeout = function () { finish("timeout"); };
-      xhr.send();
+      });
     } catch (e) { finish(e && e.message || "network error"); }
   };
   X.accept = function (bid, ask) {

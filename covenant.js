@@ -13,7 +13,10 @@ var PandaDEX = PandaDEX || {};
      of retries. MDS has no Doze-proof watcher and only runs while the node is up, so the wide
      margin matters more here, not less. */
   P.HORIZON = 1024; P.EXPIRY = 600; P.RENEW_AT = 200; P.SCAN_DEPTH = 1000; P.MAX_ORDERS = 5;
-  P.MIN_ORDER = "0.01"; P.DP = 8; P.PRICE_DP = 12;
+  /* Per-LEG cap. The covenant compares by cross-multiplication, so overflow safety depends on
+     BOTH legs staying under this — bounding only the locked side leaves the want side free to
+     overflow. */
+  P.MIN_ORDER = "0.01"; P.MAX_ORDER = "1000000000"; P.DP = 8; P.PRICE_DP = 12;
   Decimal.set({ precision: 40, rounding: Decimal.ROUND_DOWN, toExpNeg: -1000000000, toExpPos: 1000000000 });
   P.d = function (v) { return new Decimal(v === undefined || v === null || v === "" ? 0 : v); };
   P.plain = function (v) { return P.d(v).toFixed(); };
@@ -68,6 +71,16 @@ var PandaDEX = PandaDEX || {};
       && newWant.mul(locked).gte(want.mul(rem))             /* the remainder keeps at least its pro-rata price */
       && newWant.lte(want)
       && pay.mul(locked).gte(want.mul(locked.sub(rem)));    /* the maker is paid at least pro-rata */
+  };
+  /* State port 6, the advertised price. It is DISPLAY ONLY — the covenant never reads it and
+     P.order derives the real price from port 2 against the locked amount, because a taker can
+     write anything here on a remainder. Defined as want-per-locked in every path (native
+     PriceMath.price) so the same order reads the same way whoever last touched it, and rounded to
+     PRICE_DP so a partial fill does not carry a 40-digit state value on chain. */
+  P.portPrice = function (want, locked) {
+    var l = P.d(locked);
+    if (!l.gt(0)) return P.d(0);
+    return P.d(want).div(l).toDecimalPlaces(P.PRICE_DP, Decimal.ROUND_HALF_UP);
   };
   P.script = "LET u="+P.USDT+" IF (@TOKENID NEQ 0x00 AND @TOKENID NEQ u) OR (PREVSTATE(3) NEQ 0x00 AND PREVSTATE(3) NEQ u) THEN RETURN FALSE ENDIF IF SIGNEDBY(PREVSTATE(0)) THEN IF GETOUTADDR(@INPUT) EQ @ADDRESS THEN IF SAMESTATE(0 1) AND SAMESTATE(3 5) AND SAMESTATE(7 8) AND STATE(2) GT 0 AND VERIFYOUT(@INPUT @ADDRESS @AMOUNT @TOKENID TRUE) THEN RETURN TRUE ENDIF ENDIF IF VERIFYOUT(@INPUT PREVSTATE(1) @AMOUNT @TOKENID FALSE) THEN RETURN TRUE ENDIF ENDIF IF @COINAGE GT 600 THEN RETURN VERIFYOUT(@INPUT PREVSTATE(1) @AMOUNT @TOKENID FALSE) ENDIF LET w=PREVSTATE(2) LET r=0 IF @TOTOUT GT @INPUT+1 THEN IF GETOUTADDR(@INPUT+1) EQ @ADDRESS THEN LET r=GETOUTAMT(@INPUT+1) ENDIF ENDIF IF r EQ 0 THEN RETURN VERIFYOUT(@INPUT PREVSTATE(1) w PREVSTATE(3) FALSE) ENDIF RETURN r LT @AMOUNT AND r GTE PREVSTATE(8) AND VERIFYOUT(@INPUT+1 @ADDRESS r @TOKENID TRUE) AND SAMESTATE(0 1) AND SAMESTATE(3 5) AND SAMESTATE(7 8) AND STATE(2)*@AMOUNT GTE w*r AND STATE(2) LTE w AND GETOUTADDR(@INPUT) EQ PREVSTATE(1) AND GETOUTTOK(@INPUT) EQ PREVSTATE(3) AND GETOUTAMT(@INPUT)*@AMOUNT GTE w*(@AMOUNT-r)";
 })(PandaDEX);

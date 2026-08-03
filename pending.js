@@ -14,7 +14,9 @@ PandaPending.clean = function(row) {
     buy:row.buy === true || row.buy === "true" || row.BUY === true || row.BUY === "true" || row.buy === 1 || row.BUY === 1,
     minima:String(row.minima || row.MINIMA || "0"),
     price:String(row.price || row.PRICE || "0"),
-    submitMs:Number(row.submitMs || row.submitms || row.SUBMITMS || Date.now()),
+    /* A legitimate 0 is not "unknown" — || would silently restamp it as now and reset the
+       give-up clock every time the row was re-cleaned. */
+    submitMs:Number(row.submitMs !== undefined ? row.submitMs : (row.submitms !== undefined ? row.submitms : (row.SUBMITMS !== undefined ? row.SUBMITMS : Date.now()))),
     submitBlock:Number(row.submitBlock || row.submitblock || row.SUBMITBLOCK || 0)
   };
 };

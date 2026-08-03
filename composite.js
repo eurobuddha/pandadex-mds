@@ -17,7 +17,7 @@ var PandaComposite = {};
   C.planInternal = function(book, pools, takerBuys, wantMinima, limitPrice, chainBlock) {
     var plan = C.routeOnce(book, pools, takerBuys, wantMinima, limitPrice, chainBlock), drop, reduced, i;
     while (C.capacityUnits(plan) > C.MAX_CAPACITY_UNITS && plan.poolRoute && plan.poolRoute.poolsUsed > 0) {
-      drop = C.smallestPool(plan.poolRoute); if (!drop) break;
+      drop = C.smallestPool(plan.poolRoute, takerBuys); if (!drop) break;
       reduced = [];
       for (i = 0; i < pools.length; i++) if (pools[i] !== drop && pools[i].address !== drop.address) reduced.push(pools[i]);
       if (reduced.length === pools.length) break;
@@ -129,9 +129,17 @@ var PandaComposite = {};
     for (i = 0; i < pools.length; i++) { p = PandaPool.clean(pools[i]); if (PandaPool.funded(p) && P.eqTok(p.tok, P.USDT)) out.push(p); }
     return out;
   };
-  C.smallestPool = function(route) {
+  /* Which pool contributes the least MINIMA — and that is a different leg depending on the side:
+     buying MINIMA it is the route OUT, selling it is the route IN. Measuring outAmount either way
+     ranked pools by their mxUSDT leg on the sell side and dropped the wrong one, giving a worse
+     fill than necessary whenever a plan had to be shrunk to fit the capacity budget. */
+  C.poolMinimaOf = function(alloc, takerBuys) { return P.d(takerBuys ? alloc.quote.outAmount : alloc.quote.inAmount); };
+  C.smallestPool = function(route, takerBuys) {
     var best = null, i, a;
-    for (i = 0; i < (route.allocs || []).length; i++) { a = route.allocs[i]; if (!best || a.quote.outAmount.lt(best.quote.outAmount)) best = a; }
+    for (i = 0; i < (route.allocs || []).length; i++) {
+      a = route.allocs[i];
+      if (!best || C.poolMinimaOf(a, takerBuys).lt(C.poolMinimaOf(best, takerBuys))) best = a;
+    }
     return best ? best.pool : null;
   };
   C.addSource = function(plan, coinid) { if (coinid && plan.sourceCoinIds.indexOf(coinid) < 0) plan.sourceCoinIds.push(coinid); };

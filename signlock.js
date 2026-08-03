@@ -67,7 +67,10 @@ var PandaSignLock = PandaSignLock || {};
   function acquire(owner, cb) {
     if (!sqlFn) return cb();
     table(function () {
-      sqlFn("DELETE FROM `" + L.TABLE + "` WHERE `ts`<" + (Date.now() - L.TTL_MS), function () {
+      /* Prune both directions. A row stamped in the future — a device whose clock was later
+         corrected backwards — would never age out of a `ts <` test, wedging every signing path
+         until the clock caught up. */
+      sqlFn("DELETE FROM `" + L.TABLE + "` WHERE `ts`<" + (Date.now() - L.TTL_MS) + " OR `ts`>" + (Date.now() + L.TTL_MS), function () {
         /* The primary-key violation is the mutex: status:false means somebody else holds row 1. */
         sqlFn("INSERT INTO `" + L.TABLE + "` (`id`,`owner`,`ts`) VALUES (1,'" + esc(owner) + "'," + Date.now() + ")", function (r) {
           if (r && r.status === true) return cb();

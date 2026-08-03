@@ -16,9 +16,15 @@ var PandaExport = PandaExport || {};
   /* Cut, never round up. */
   function down(v, dp) { return dec(v).toDecimalPlaces(dp, Decimal.ROUND_DOWN).toFixed(dp); }
   function iso(ms) { var n = Number(ms || 0); return n > 0 ? new Date(n).toISOString() : ""; }
-  /* RFC4180: quote anything containing a comma, quote or newline, and double any inner quote. */
+  /* RFC4180: quote anything containing a comma, quote or newline, and double any inner quote.
+     Then the part quoting does NOT solve: a field starting with = + - @ or a control character is
+     executed as a formula by Excel, Sheets and LibreOffice. That matters here because an order's
+     id is state port 4 — chosen by whoever created the order and never validated — so anyone can
+     put `=HYPERLINK(...)` on the book and have it run inside your accounting export. Prefixing
+     with an apostrophe is the standard neutralisation and is stripped on display. */
   function csv(v) {
     var s = v === undefined || v === null ? "" : String(v);
+    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
     return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }
   function row(cells) { var i, out = []; for (i = 0; i < cells.length; i++) out.push(csv(cells[i])); return out.join(","); }

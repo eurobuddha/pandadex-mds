@@ -361,4 +361,48 @@ assert.strictEqual(many.takes[many.takes.length-1].partial,true);
 /* A sweep never exceeds the covenant's per-transaction order cap. */
 var wide=[],wi; for(wi=0;wi<12;wi++) wide.push(ask("0x2"+wi,"10","1",100));
 assert(PandaBook.plan(wide,true,"120",null,110).takes.length<=PandaDEX.MAX_ORDERS);
+/* ---- fixes from the 0.3.5 review ---- */
+/* Both LEGS are capped, not just the locked one: the covenant compares by cross-multiplication,
+   so an unbounded want side can overflow just as easily. */
+var legCalls=[];
+function legCmd(c,cb){legCalls.push(c);cb({status:true,response:{random:"0x55"}});}
+PandaTxn.create(legCmd,{publickey:"0xabc",address:"0x"+"a".repeat(64)},{buy:false,minima:"1000000000",price:"2",orderId:"0x1"},function(err){assert(err&&err.indexOf("permitted range")>0);});
+assert(!legCalls.some(function(c){return c.indexOf("send ")===0;}));
+/* Funding is capped at 8 inputs and refused up front, not after signing has already burned a key. */
+var dust=[],di; for(di=0;di<40;di++) dust.push({coinid:"0xd"+di,tokenid:"0x00",amount:"0.001",address:"0xw"});
+PandaTxn.findCoins(function(c,cb){cb({status:true,response:dust});},"0x00","5",{},8,function(err,coins){
+  assert(err&&err.indexOf("consolidate")>0); assert.strictEqual(coins,undefined); });
+/* CSV fields that a spreadsheet would execute are neutralised. The order id is covenant port 4 —
+   chosen by whoever created the order and never validated — so this is attacker-controlled. */
+var evil=PandaExport.confirmedCsv([{timems:1,price:"2",size:"1",buy:true,orderid:'=HYPERLINK("http://evil","x")'}]);
+assert(evil.indexOf("'=HYPERLINK")>0);
+assert(evil.indexOf(",=HYPERLINK")<0);
+["+1","-1","@x","\tx"].forEach(function(bad){
+  assert(PandaExport.confirmedCsv([{timems:1,price:"2",size:"1",buy:true,orderid:bad}]).indexOf("'"+bad.charAt(0))>0); });
+/* Port 6 is want-per-locked everywhere and rounded, so a partial never carries a 40-digit state
+   value and the same order reads the same way whichever path last touched it. */
+assert.strictEqual(PandaDEX.portPrice("1","3").toFixed(),"0.333333333333");
+assert.strictEqual(PandaDEX.portPrice("1","0").toFixed(),"0");
+calls=[];PandaTxn.relock(fakeCmd,sell,"30",function(){});
+assert(calls.some(function(c){return c==="txnstate id:"+calls[0].split("id:")[1]+" port:6 value:3";}));
+/* The smallest pool is the one contributing least MINIMA — a different leg on each side. */
+var allocBig={pool:{address:"0xbig"},quote:{inAmount:PandaDEX.d(100),outAmount:PandaDEX.d(1)}};
+var allocSmall={pool:{address:"0xsmall"},quote:{inAmount:PandaDEX.d(1),outAmount:PandaDEX.d(100)}};
+assert.strictEqual(PandaComposite.smallestPool({allocs:[allocBig,allocSmall]},true).address,"0xbig");
+assert.strictEqual(PandaComposite.smallestPool({allocs:[allocBig,allocSmall]},false).address,"0xsmall");
+/* Against a buy order the reported MINIMA is what the taker actually delivers. */
+function bidOrder(id,usdt,price,minRem){var c=JSON.parse(JSON.stringify(C));c.coinid=id;c.tokenid=PandaDEX.USDT;c.tokenamount=usdt;c.amount=usdt;c.created="100";
+  c.state["2"]=PandaDEX.d(usdt).div(price).toFixed();c.state["3"]="0x00";c.state["5"]="0";c.state["4"]=id;c.state["8"]=minRem||"0";return PandaDEX.order(c);}
+var bidO=bidOrder("0xb1","20","2"), bidPlan=PandaBook.plan([bidO],false,"3",null,110);
+assert.strictEqual(bidPlan.takes.length,1);
+assert(bidPlan.takes[0].minima.gte(bidPlan.takes[0].pay));   /* never understates the spend */
+assert(bidPlan.totalMinima.gte(bidPlan.takes[0].pay));
+/* A wide window that comes back empty is re-checked once before being believed — an over-cap MDS
+   reply is indistinguishable from a genuinely empty one, and believing it drops real orders. */
+var scanQueries=[];
+PandaBook.scan(function(c,cb){scanQueries.push(c);cb({status:true,response:[]});},function(found,incomplete){
+  assert.deepStrictEqual(found,[]); assert.strictEqual(incomplete,false); });
+assert(scanQueries.length>1);
+assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+PandaDEX.SCAN_DEPTH)>0;}));  /* full window first */
+assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.floor(PandaDEX.SCAN_DEPTH/2))>0;}));  /* then halved */
 console.log("PandaDEX pure tests passed");
