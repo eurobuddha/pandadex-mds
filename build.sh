@@ -29,7 +29,7 @@ fi
 echo "Running tests..."
 node test.js
 
-SHIP="index.html style.css fonts.css parity.css inter_var.ttf jetbrains_mono_var.ttf mds.js decimal.js covenant.js signlock.js book.js pool.js composite.js txn.js tape.js maker.js price.js verifier.js pending.js stats.js split.js history.js export.js explorer.js service.js favicon.png"
+SHIP="index.html style.css fonts.css parity.css inter_var.ttf jetbrains_mono_var.ttf mds.js decimal.js covenant.js balance.js signlock.js book.js pool.js composite.js txn.js tape.js maker.js price.js verifier.js pending.js stats.js split.js history.js export.js explorer.js service.js favicon.png"
 
 # Completeness guard. The ship list is hand-maintained, and it has been wrong in both directions:
 # sweep.js was shipped long after its last caller went, and pool.js/composite.js were dropped from

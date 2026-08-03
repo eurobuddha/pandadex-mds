@@ -3,6 +3,45 @@
 Newest first. Each entry names the native PandaDEX version it reaches parity with, and the specific
 on-chain failure it prevents.
 
+## [0.4.4] — the ASSETS card was telling you money was confirming when it was locked
+
+**Fixed — a wrong figure under a wrong label.** The per-asset card showed *Available / In orders /
+Confirming*, and `Confirming` was computed as `confirmed − sendable` with the caption "Funds from a
+recent trade are still confirming." That is the **locked** figure: money the node has fully
+confirmed and will not spend — coins held in a contract, or change whose spend has not settled.
+Waiting does not release it, so the caption asked you to wait for something that was not coming.
+
+Worse, the node reports a real `unconfirmed` figure of its own — the one number that *does* become
+spendable by waiting — and the page never read it. The genuinely pending money was invisible, and
+the money that was not pending was labelled as pending.
+
+The node gives four independent figures and they stay four now, exactly as native `AssetsTab` and
+AtomiX's wallet card show them:
+
+```
+MINIMA · available to trade                                    7.5
+confirmed 10  ·  locked ≈ 2.5  ·  unconfirmed 2.25  ·  4 coins  ·  updated 12s ago
+in PandaDEX orders 3
+```
+
+The headline number is now **sendable** — the only figure an order can actually be funded from. The
+summary card above it says AVAILABLE TO TRADE and values sendable funds only; it previously said
+PORTFOLIO and totalled free + locked + confirming, which native does not show anywhere.
+
+`updated <ago>` is repainted once a second while ASSETS is open. Painted once, an age line starts
+lying immediately — the same defect fixed for the transaction stage line in 0.4.0.
+
+**Also — the coin count now does the job it does in native.** One coin funds one rung per block, so
+ten MINIMA in one coin builds a ladder far more slowly than ten MINIMA in ten coins. Publishing a
+ladder with fewer funding coins than rungs now warns before it starts, and points at Split funding
+coins (native `makerFundingHint`). A funding shortfall also names *why* the rest is unusable —
+`you have 3 sendable (2 confirmed locked, 1 unconfirmed)` — instead of just stating the shortfall
+(native `appendUnavailable`).
+
+Parsing lives in `balance.js` and is covered by the cases from native's `BalanceDisplayTest`, plus
+sendable-exceeds-confirmed (locked must floor at zero, not render negative) and a missing `sendable`
+key falling back to confirmed rather than reading as an empty wallet.
+
 ## [0.3.7] — the app could not sign or post anything, and had not been able to since 0.2.33
 
 **Fixed — every fund-moving action was impossible.** `signlock.js`, the serial signing gate added in

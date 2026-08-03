@@ -1,7 +1,7 @@
 /* Pure regression tests; run with `node test.js`. */
 var assert=require("assert"), fs=require("fs"), vm=require("vm");
 global.Decimal=require("./decimal.js");
-["covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
+["covenant.js","balance.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
 var C={coinid:"0x1",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xabc","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
 var poison=JSON.parse(JSON.stringify(C)); poison.state["3"]="0x00"; assert.strictEqual(PandaDEX.order(poison),null);
@@ -824,4 +824,63 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   }, ["0xmissing"], function (found) { assert.deepStrictEqual(found, {}); });
   assert(budget.length <= PandaHistory.MAX_FETCHES + 1, "history paging ran past its call budget");
 })();
+/* ---- ASSETS balance breakdown. Ported from native BalanceDisplayTest, which exists because the
+   four figures had been collapsed into two before and the card then asserted things that were not
+   true — "confirming" money that was actually locked, and unconfirmed money shown nowhere. */
+(function () {
+  var fmt = function (v) { return PandaDEX.d(v).toDecimalPlaces(8).toFixed(); }, m, z, line;
+
+  m = PandaBalance.meta({response:{sendable:"7.5", confirmed:"10", unconfirmed:"2.25", coins:4}}, 5000);
+  assert(m.sendable.eq("7.5") && m.confirmed.eq("10") && m.unconfirmed.eq("2.25"), "balance figures mis-parsed");
+  assert(PandaBalance.locked(m).eq("2.5"), "locked must be confirmed minus sendable");
+  assert.strictEqual(m.coins, 4);
+
+  /* A reply the node never answered must read as an empty wallet, not throw and not leave stale
+     numbers on screen under a fresh timestamp. */
+  z = PandaBalance.meta(null);
+  assert(z.sendable.eq(0) && z.confirmed.eq(0) && z.unconfirmed.eq(0) && z.coins === 0 && z.at === 0);
+  assert.strictEqual(PandaBalance.age(Date.now(), z.at), "never");
+  assert(PandaBalance.locked(z).eq(0));
+
+  /* sendable can EXCEED confirmed on a node counting mempool change; locked must floor at zero
+     rather than render as a negative "locked" figure. */
+  assert(PandaBalance.locked(PandaBalance.meta({sendable:"5", confirmed:"3"})).eq(0), "locked must floor at zero");
+
+  /* Absent sendable falls back to confirmed — an older node that does not report it must not read
+     as a wallet with nothing spendable. */
+  assert(PandaBalance.meta({confirmed:"9"}).sendable.eq("9"), "missing sendable must fall back to confirmed");
+  assert.strictEqual(PandaBalance.meta({confirmed:"1", coinamount:6}).coins, 6, "coinamount is the fallback key");
+  assert.strictEqual(PandaBalance.meta({confirmed:"1", coins:"bad"}).coins, 0);
+
+  /* The four figures must all appear, and each must be labelled as itself. */
+  line = PandaBalance.line(m, fmt, 5000 + 90 * 1000);
+  ["confirmed 10", "locked ≈ 2.5", "unconfirmed 2.25", "4 coins", "updated 1m ago"].forEach(function (part) {
+    assert(line.indexOf(part) >= 0, "balance line is missing: " + part + "  (" + line + ")");
+  });
+  assert(PandaBalance.line(PandaBalance.meta({confirmed:"1", coins:1}, 1), fmt, 1).indexOf("1 coin ") >= 0);
+  assert.strictEqual(PandaBalance.age(0, 0), "never");
+  assert.strictEqual(PandaBalance.age(30 * 1000, 0 + 1) , "29s ago");
+  assert.strictEqual(PandaBalance.age(3 * 3600 * 1000, 1), "2h ago");
+
+  /* A shortfall must say WHY the rest is unusable — otherwise "you have 7.5 sendable" next to a
+     10 balance reads as a bug in the app. */
+  assert.strictEqual(PandaBalance.unavailable(m, fmt), " (2.5 confirmed locked, 2.25 unconfirmed)");
+  assert.strictEqual(PandaBalance.unavailable(PandaBalance.meta({confirmed:"5", sendable:"5"}), fmt), "");
+
+  /* Coin count gates ladder speed: one coin funds one rung per block. */
+  assert(PandaBalance.fundingHint(4, 0, 1, 9).indexOf("1 coin for 4 ask rungs") >= 0);
+  assert(PandaBalance.fundingHint(0, 3, 9, 2).indexOf("2 coins for 3 bid rungs") >= 0);
+  assert.strictEqual(PandaBalance.fundingHint(4, 3, 9, 9), "", "ample coins must not nag");
+  assert.strictEqual(PandaBalance.fundingHint(1, 1, 0, 0), "", "unknown coin counts must not nag");
+})();
+
+/* The page must not resurrect the collapsed two-figure model. */
+(function () {
+  var page = fs.readFileSync("index.html", "utf8");
+  ["minimaConfirming", "usdtConfirming", "minimaFree", "usdtFree"].forEach(function (dead) {
+    assert(page.indexOf(dead) < 0, "index.html still uses the removed balance field " + dead);
+  });
+  assert(page.indexOf("balance.js") >= 0, "index.html must load balance.js");
+})();
+
 console.log("PandaDEX pure tests passed");

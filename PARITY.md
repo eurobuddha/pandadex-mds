@@ -85,8 +85,11 @@ it was read; if it says Partial or No, the gap is named rather than rounded up.
 
 | Behaviour | Status | Evidence / gap |
 |---|---|---|
-| Portfolio value at book mid | **Yes** | `renderAssetsPage()` |
-| Per-asset card | **Partial** | We show Available / In orders / Confirming. Native shows **sendable, confirmed, locked, unconfirmed, coin count and "updated <ago>"** — four figures plus two we do not have |
+| Headline value = SENDABLE only, at book mid | **Yes** | `renderAssetsPage()`; was "PORTFOLIO" over free+locked+confirming, which native does not show |
+| Per-asset card: sendable, confirmed, locked, unconfirmed, coins, updated | **Yes** (0.4.4) | `balance.js` + `assetCard()`. Was Available / In orders / **Confirming**, where "Confirming" was `confirmed − sendable` — that is LOCKED, and the node's real `unconfirmed` was never read at all |
+| `updated <ago>` stays honest | **Yes** (0.4.4) | the 1Hz page ticker repaints ASSETS while that pane is open; native repaints on every `repaint()` |
+| Coin count drives the maker funding warning | **Yes** (0.4.4) | `PandaBalance.fundingHint`, native `makerFundingHint` |
+| Shortfall says why funds are unusable | **Yes** (0.4.4) | `PandaBalance.unavailable`, native `appendUnavailable` |
 | `in PandaDEX orders` from resting orders | **Yes** | `lockedTotals()` |
 | RECEIVE card, tap to copy | **Yes** | `copyReceive()` |
 | NEED mxUSDT card | **Yes** | `renderAssetsPage()` |
@@ -265,7 +268,7 @@ at. Market-tape completeness only.
 **The four real absences:** ticker pulse animation; persisted book cache / cold-start paint; the
 book's confirm-count belief rule; and restricted-node pending-sign (not needed for a WRITE dapp).
 
-**The Partials that matter**, in order: ASSETS balance detail (§6) and the ZIP export (§13).
+**The Partials that matter**, in order: the ZIP export (§13) — the ASSETS balance detail closed in 0.4.4.
 Everything else is cosmetic or a platform limit.
 
 Fill adjudication (§15) is now **ahead** of native on two counts — true-history verification and
