@@ -1,7 +1,7 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PandaDEX</title><link rel="stylesheet" href="fonts.css"><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="parity.css"></head>
 <body>
-<header class="topbar"><div class="brand"><h1>◆ PANDADEX</h1></div><div class="chrome-pills"><span id="versionPill" class="pill">v0.4.2</span><button id="themePill" class="pill pill-button" onclick="toggleTheme()" aria-label="Toggle theme">☀</button><span id="nodePill" class="pill">PAIRING…</span><span id="blockPill" class="pill"># —</span><button class="icon-button" onclick="send('REFRESH')" aria-label="Refresh">↻</button></div></header>
+<header class="topbar"><div class="brand"><h1>◆ PANDADEX</h1></div><div class="chrome-pills"><span id="versionPill" class="pill">v0.4.3</span><button id="themePill" class="pill pill-button" onclick="toggleTheme()" aria-label="Toggle theme">☀</button><span id="nodePill" class="pill">PAIRING…</span><span id="blockPill" class="pill"># —</span><button class="icon-button" onclick="send('REFRESH')" aria-label="Refresh">↻</button></div></header>
 <main>
   <div id="status" class="notice loading">Connecting to Minima…</div>
   <section class="wallet-strip"><div><label>BLOCK</label><strong id="block">—</strong></div><div><label>MINIMA</label><strong id="minima">—</strong></div><div><label>mxUSDT</label><strong id="usdt">—</strong></div></section>
@@ -36,7 +36,7 @@
   <section id="tapeView" class="view-pane"><div class="mini-seg"><button id="myTapeBtn" class="active" onclick="tapeSub=0;renderTapePage()">MY TRADES</button><button id="mktTapeBtn" onclick="tapeSub=1;renderTapePage()">MARKET TAPE</button></div><div id="tapePage"></div></section>
 </main>
 <script src="mds.js"></script><script src="decimal.js"></script><script src="covenant.js"></script><script src="book.js"></script><script src="pool.js"></script><script src="composite.js"></script><script src="maker.js"></script><script src="pending.js"></script><script src="export.js"></script><script src="explorer.js"></script><script src="stats.js"></script><script>
-var PANDADEX_VERSION = "0.4.2";
+var PANDADEX_VERSION = "0.4.3";
 var state = {}, balancesState = {}, isBuy = true, gtcOn = true, ordersSub = 0, tapeSub = 0, chartSel = 1, chartSelected = -1, makerHydrated = false, CHARTS = [900000,3600000,14400000,86400000], GROUPS = ["0.00001", "0.0001", "0.001", "0.01"], groupIdx = Number(localStorage.getItem("pandadex_group") || 0);
 function el(id) { return document.getElementById(id); }
 /* HTML-escaping is NOT JS-string escaping. Inside onclick="fn('...')" the parser decodes

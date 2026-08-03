@@ -1,11 +1,15 @@
 # Parity audit — PandaDEX MiniDapp vs native PandaDEX
 
 Native reference: `apks/pandadex` **0.3.9** (50 classes, 27 test classes).
-MiniDapp audited: **0.4.2**.
+MiniDapp audited: **0.4.3**.
 
 Every row was checked by reading both sides. Status is one of **Yes** (behaviour matches),
 **Partial** (present but differs — the difference is stated), **No** (absent), or **N/A**
 (impossible on MDS, with the reason).
+
+**Native `apks/pandadex` is the reference.** Where a behaviour differs between native and another
+MDS app in the family, native wins — the other apps are only consulted for MDS *runtime* patterns
+(what the service scope provides), never for what the app should do.
 
 This file exists because parity was claimed twice before without being verified. If a row says Yes,
 it was read; if it says Partial or No, the gap is named rather than rounded up.
@@ -113,7 +117,7 @@ it was read; if it says Partial or No, the gap is named rather than rounded up.
 | Serial signing gate over every signing path | **Yes** | `signlock.js` — a plain in-process FIFO with a lost-callback watchdog, matching `SignGate.java` exactly. No timers and no database: the service scope has neither, and a durable lock row guarded against a second signing context this app does not have |
 | `txncheck` as sole verdict (`valid.scripts`, `validamounts`, `mmrproofs`, `allsignaturesvalid`) | **Yes** | `txn.js` `checkPost` |
 | `txndelete` on every terminal path | **Yes** | `checkPost` |
-| Transaction size gate before validation | **No** | Native uses `txnexport`; no proven MDS app does, and the canonical sequence is `txnsign -> txnbasics -> txnpost`. Dropped as an extra failure surface on the critical path |
+| Transaction size gate before validation | **Yes** | `txnexport`, 60KB, ported from `DexTxn.java:552-566` including its hard-fail on an unreadable reply |
 | Coin selection: largest-first, exclusions, ≤8 inputs, drop state-bearing coins | **Yes** | `findCoins` |
 | `checkmempool:true sendable:true` funding queries | **Yes** | `coinQuery` |
 | Create / cancel / cancelBatch / relock / collectExpired / fillSweep / fillComposite | **Yes** | `txn.js` |

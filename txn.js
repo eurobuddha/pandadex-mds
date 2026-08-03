@@ -5,6 +5,7 @@ var PandaTxn = PandaTxn || {};
   /* Narration hook. The service points this at PDService.setStage so a trade reports what it is
      actually doing instead of showing one frozen line for minutes. No-op by default. */
   T.stage = function () {};
+  T.MAX_TX_BYTES = 60 * 1024;   /* native DexTxn: 60 * 1024 */
   T.MAX_FUNDING_INPUTS = 8;
   /* Limit/service.js checks the sign error for LOCK and says what to do about it. A locked vault
      fails EVERY signature, and on a node left locked that is an ordinary state — reporting the raw
@@ -48,11 +49,25 @@ var PandaTxn = PandaTxn || {};
       T.stage("Signing " + steps.length + " step" + (steps.length===1?"":"s") + "…");
       T.run(cmd,steps,id,function(err){ if(err)return finish(T.signError(err) || err);
         T.stage("Checking the transaction before it is sent…");
-        /* Straight to validation. An earlier version called `txnexport` here to size-check the
-           transaction, but no proven MDS app does — Limit and pandapools both post
-           txnsign -> txnbasics -> txnpost, which is also the canonical sequence in the reference
-           notes. It was an extra round-trip and an extra failure surface on the one path that has
-           broken repeatedly, for a guard the covenant's own order cap already bounds. */
+        /* Size gate before the validation gate — a direct port of native DexTxn.postGated
+           (DexTxn.java:552-566), because native is the parity reference and native does this.
+           I removed it in 0.4.2 on the grounds that Limit and pandapools do not, which was the
+           wrong reference to reason from. Native's shape exactly: read response.data, strip 0x,
+           two hex chars per byte; over 60KB is a hard fail with the actionable message, and an
+           unreadable reply is ALSO a hard fail rather than a silent pass. Composite fills — pool
+           pairs plus order coins plus funding — are the shape that overflows. */
+        cmd("txnexport id:"+id,function(exp){
+          var resp=exp&&exp.response, data=(resp&&typeof resp.data==="string")?resp.data:null, hex, bytes;
+          if(!exp||!exp.status||data===null){
+            cmd("txndelete id:"+id,function(){});
+            return finish((exp&&exp.error)||"Could not size the transaction before sending it");
+          }
+          hex=(data.indexOf("0x")===0||data.indexOf("0X")===0)?data.substring(2):data;
+          bytes=Math.floor(hex.length/2);
+          if(bytes>T.MAX_TX_BYTES){
+            cmd("txndelete id:"+id,function(){});
+            return finish("Transaction is too large ("+Math.round(bytes/1024)+"KB) — reduce the number of orders or consolidate your wallet coins");
+          }
         cmd("txncheck id:"+id,function(check){
           /* Mirror Android's proven gate. `validamounts` is the Minima verdict field;
              older node responses carry it beside `valid`, not inside it. */
@@ -71,6 +86,7 @@ var PandaTxn = PandaTxn || {};
           }
           T.stage("Posting to the network…");
           cmd("txnpost id:"+id,function(post){if(!post||(!post.status&&!post.pending)){cmd("txndelete id:"+id,function(){});return finish((post&&post.error)||"Transaction was not accepted");}cmd("txndelete id:"+id,function(){});finish(null,post.response&&post.response.txpowid||id);});
+        });
         });
       });
     }, function (blocked) { done(blocked); });

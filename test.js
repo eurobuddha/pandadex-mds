@@ -154,7 +154,7 @@ assert(wholePlan.orderTakes.length===1&&wholePlan.orderTakes[0].partial===false)
 assert(PandaPool.scriptArg("LET fx=MAX(dx 0)*5/1000").indexOf("*5/1000")>0);
 assert.strictEqual(PandaPool.scriptArg('a"b'),'"a\\"b"');
 var builtCalls=[], builtOutcome=null;
-function comboCmd(command, cb){builtCalls.push(command);if(command.indexOf("coins relevant:true")===0)return cb({status:true,response:[{coinid:"0xfund",tokenid:PandaDEX.USDT,tokenamount:"1",amount:"1",address:"0xfunder"}]});if(command.indexOf("newscript")===0)return cb({status:true});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xcombo"}});cb({status:true});}
+function comboCmd(command, cb){builtCalls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("coins relevant:true")===0)return cb({status:true,response:[{coinid:"0xfund",tokenid:PandaDEX.USDT,tokenamount:"1",amount:"1",address:"0xfunder"}]});if(command.indexOf("newscript")===0)return cb({status:true});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xcombo"}});cb({status:true});}
 PandaTxn.fillComposite(comboCmd,{address:"0xme"},combo,true,function(err,tx){builtOutcome={err:err,tx:tx};});
 var comboCreate=builtCalls.filter(function(c){return c.indexOf("txncreate id:combo_")===0;})[0], comboId=comboCreate.split("id:")[1];
 assert.deepStrictEqual(builtOutcome,{err:null,tx:"0xcombo"});assert(builtCalls.some(function(c){return c==="txninput id:"+comboId+" coinid:0xpm";}));assert(builtCalls.some(function(c){return c.indexOf("address:0xpool")>0&&c.indexOf("tokenid:"+PandaDEX.USDT)>0;}));
@@ -174,7 +174,7 @@ assert.strictEqual(layoutInputs[layoutInputs.length-1],"txninput id:tx coinid:0x
 /* Regression: Minima's txncheck says `validamounts`, never `amounts`. A valid owner-cancel
    must post, and must sign specifically with the owner key embedded in port 0. */
 var calls=[], outcome=null;
-function fakeCmd(command, cb){calls.push(command);if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xposted"}});cb({status:true});}
+function fakeCmd(command, cb){calls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xposted"}});cb({status:true});}
 PandaTxn.cancel(fakeCmd,sell,function(err,tx){outcome={err:err,tx:tx};});
 assert.deepStrictEqual(outcome,{err:null,tx:"0xposted"});assert(calls.some(function(c){return c.indexOf("txnsign")===0&&c.indexOf("publickey:0xabc")>0;}));
 calls=[];outcome=null;PandaTxn.relock(fakeCmd,sell,"30",function(err,tx){outcome={err:err,tx:tx};});
@@ -232,13 +232,27 @@ PandaSignLock.gate("holder",function(release){
 });
 assert.strictEqual(gatedDuring,false);   /* the send waited for the holder to release */
 assert(calls.some(function(c){return c.indexOf("send ")===0&&c.indexOf("address:"+PandaDEX.ADDR)>0;}));
-/* The canonical post sequence is txnsign -> txnbasics -> txnpost, as Limit and pandapools both do.
-   txnexport was an extra round-trip on the critical path that no proven MDS app makes. */
+/* Size gate, ported from native DexTxn.postGated. Native is the parity reference and native does
+   this; removing it in 0.4.2 because Limit and pandapools do not was reasoning from the wrong app. */
 calls=[];outcome=null;
-PandaTxn.cancel(fakeCmd,sell,function(err,tx){outcome={err:err,tx:tx};});
-assert.deepStrictEqual(outcome,{err:null,tx:"0xposted"});
-assert(!calls.some(function(c){return c.indexOf("txnexport")===0;}),"txnexport is back on the critical path");
-assert(calls.indexOf("txnbasics id:"+calls[0].split("id:")[1])>calls.map(function(c){return c.indexOf("txnsign")===0;}).indexOf(true));
+function sizedCmd(bytes){return function(command,cb){calls.push(command);
+  if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x"+"ab".repeat(bytes)}});
+  if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}});
+  if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xposted"}});
+  cb({status:true});};}
+PandaTxn.cancel(sizedCmd(10),sell,function(err,tx){outcome={err:err,tx:tx};});
+assert.deepStrictEqual(outcome,{err:null,tx:"0xposted"},"a small transaction must still post");
+assert(calls.some(function(c){return c.indexOf("txnexport")===0;}),"the size gate must run");
+calls=[];outcome=null;
+PandaTxn.cancel(sizedCmd(70*1024),sell,function(err){outcome=err;});
+assert(outcome&&outcome.indexOf("too large")>0,"an oversized transaction must be refused");
+assert(!calls.some(function(c){return c.indexOf("txncheck")===0;}),"refused before validation");
+assert(calls.some(function(c){return c.indexOf("txndelete")===0;}),"and cleaned up");
+/* Native fails hard when it cannot size the transaction; it does not pass silently. */
+calls=[];outcome=null;
+PandaTxn.cancel(function(command,cb){calls.push(command);if(command.indexOf("txnexport")===0)return cb({status:false,error:"no export"});cb({status:true});},sell,function(err){outcome=err;});
+assert(outcome,"an unreadable txnexport must fail, as native does");
+assert(!calls.some(function(c){return c.indexOf("txnpost")===0;}),"nothing may post when the size is unknown");
 
 /* A locked vault fails EVERY signature and is an ordinary state on a node left locked. Limit says
    what to do about it; we used to surface the raw node error, which explains nothing. */
@@ -246,7 +260,7 @@ assert(PandaTxn.signError("Vault is LOCKED").indexOf("vault is LOCKED")>0);
 assert(PandaTxn.signError("signing failed: Public Key not found").indexOf("not finished preparing")>0);
 assert.strictEqual(PandaTxn.signError("some other problem"),"");
 calls=[];outcome=null;
-function lockedCmd(command,cb){calls.push(command);if(command.indexOf("txnsign")===0)return cb({status:false,error:"Wallet is LOCKED"});cb({status:true});}
+function lockedCmd(command,cb){calls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("txnsign")===0)return cb({status:false,error:"Wallet is LOCKED"});cb({status:true});}
 PandaTxn.cancel(lockedCmd,sell,function(err){outcome=err;});
 assert(outcome&&outcome.indexOf("vault is LOCKED")>0,"a locked vault must name itself, got: "+outcome);
 assert(calls.some(function(c){return c.indexOf("txndelete")===0;}),"a failed sign must still clean up");
