@@ -1,7 +1,7 @@
 # Parity audit — PandaDEX MiniDapp vs native PandaDEX
 
 Native reference: `apks/pandadex` **0.3.9** (50 classes, 27 test classes).
-MiniDapp audited: **0.3.8**.
+MiniDapp audited: **0.3.9**.
 
 Every row was checked by reading both sides. Status is one of **Yes** (behaviour matches),
 **Partial** (present but differs — the difference is stated), **No** (absent), or **N/A**
@@ -134,7 +134,7 @@ it was read; if it says Partial or No, the gap is named rather than rounded up.
 | Anti-phantom guards: truncated, mass-vanish, stale-prev, per-scan cap | **Yes** | `tape.js` |
 | Cancel log consulted before adjudication | **Yes** | `cancelled_coins`, registered at submit time |
 | `FillVerifier` CANCELLED / FILLED / UNKNOWN, UNKNOWN dropped | **Yes** | `verifier.js` + `recordObservedFill` |
-| Evidence linked to the specific order | **No** | Both apps match on address + amount only. Same weakness in native; documented, not fixed |
+| Evidence linked to the specific order | **Yes** | Exclusive batch adjudication — see §15. Stronger than native |
 
 ## 10. Pools and composite (`PoolBook`, `VirtualCurve`, `PoolRouter`, `CompositeRouter`, `SyntheticDepth`)
 
@@ -190,20 +190,39 @@ running. Native survives the phone sleeping; this cannot. That is a platform lim
 | Delivered as one ZIP | **Partial** | Four separate downloads; no ZIP library available |
 | Explorer txpow verification | **Yes** | `explorer.js` |
 
-## 14. Own-trade recording — the largest remaining gap
+## 14. Own-trade recording — CLOSED in 0.3.9
 
 Native gates a taker row behind three checks (`MainActivity.reconcileTakerFill` /
-`completeTakerFill`):
+`completeTakerFill`). All three are now implemented:
 
-1. no source coin still present locally — **we have this** (`sourceStillLive`);
-2. `coins coinid:<id>` per source says spent, **tri-state, unknown ≠ spent** — **we do not**;
-3. an exact-amount proceeds coin at our address with `created >= postBlock` — **we do not**.
+1. no source coin still present locally — `sourceStillLive` — **Yes**;
+2. `coins coinid:<id>` per source says spent, **tri-state, unknown ≠ spent** — `allSourcesSpent`
+   + `PandaVerify.coinPresent` — **Yes**;
+3. an exact-amount proceeds coin at our address with `created >= postBlock` — `proceedsArrived`
+   + `PandaVerify.proceedsPresent` — **Yes**.
 
-We record on gate 1 alone. That is weaker evidence than native's `LOCAL_VERIFIED` claims, and the
-row asserts a verification we did not perform. `fillMeta` is also memory-only, where native survives
-a restart, so a trade posted and confirmed across a service restart is lost.
+`LOCAL_VERIFIED` is only written once all three hold, so the claim is now true. `fillMeta` is
+persisted in `fill_state`, so a service restart between posting and confirmation no longer loses
+the trade. Ported from `TakerConfirmationTest`, including that an unreadable reply must never read
+as spent, and that a token payout is measured by `tokenamount` rather than the raw amount.
 
-**Status: Partial.** This is the top item outstanding.
+## 15. Fill adjudication — STRONGER THAN NATIVE in 0.3.9
+
+Native's `FillVerifier` adjudicates each vanished order **independently**: fetch coins at its payout
+address, match on token and amount. Every order a wallet creates carries the same payout address, so
+one cancelled ask rung's refund satisfies "payment" for every bid rung of the same size that vanishes
+in the same window. Measured on the reported ladder: **three cancellations produced three phantom
+trades**; with the fix, zero, and the three cancels are correctly identified.
+
+The fix is exclusivity, not a better predicate. `PandaVerify.adjudicateBatch` settles every vanish in
+a scan together, and **a coin is evidence for at most one order** — clean refunds claim first (which
+is what stops a refund being read as somebody else's payment), payments take what remains, and
+native's payment-wins precedence is preserved for a genuinely ambiguous single order so this ports
+back without a behaviour change. Evidence must also be newer than the last block the order was
+actually seen alive, so a pre-existing coin cannot explain a disappearance.
+
+**This is the item to port back to the APK.** `verifier.js` `adjudicateBatch` / `findUnclaimed` /
+`earliest` map directly onto `FillVerifier`, and `tape.js` supplies the last-seen block.
 
 ---
 
@@ -211,15 +230,15 @@ a restart, so a trade posted and confirmed across a service restart is lost.
 
 | | Count |
 |---|---|
-| Yes | 71 |
-| Partial | 13 |
-| No | 5 |
+| Yes | 76 |
+| Partial | 11 |
+| No | 4 |
 | N/A (platform) | 6 |
 
-**The five real absences:** ticker pulse animation; persisted book cache / cold-start paint; the
-book's confirm-count belief rule; order-linked fill evidence (absent in native too); and
-restricted-node pending-sign (not needed).
+**The four real absences:** ticker pulse animation; persisted book cache / cold-start paint; the
+book's confirm-count belief rule; and restricted-node pending-sign (not needed for a WRITE dapp).
 
-**The Partials that matter**, in order: own-trade recording evidence (§14), ASSETS balance detail
-(§6), the book belief rule (§9), and the ZIP export (§13). Everything else is cosmetic or a platform
-limit.
+**The Partials that matter**, in order: ASSETS balance detail (§6) and the ZIP export (§13).
+Everything else is cosmetic or a platform limit.
+
+Fill adjudication (§15) is now **ahead** of native and is queued to be ported back to the APK.

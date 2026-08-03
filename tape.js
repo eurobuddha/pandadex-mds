@@ -19,7 +19,7 @@ var PandaTape = PandaTape || {};
     return d.div(price).toDecimalPlaces(P.DP, Decimal.ROUND_DOWN);
   };
   T.newDiff = function (cancelLog, staleMs) {
-    return { prev:null, prevAtMs:0, missing:{}, cancels:cancelLog || null, staleMs:staleMs || T.STALE_PREV_MS };
+    return { prev:null, prevAtMs:0, missing:{}, seen:{}, cancels:cancelLog || null, staleMs:staleMs || T.STALE_PREV_MS };
   };
   T.ingest = function (state, bookArr, truncated, chainBlock, sink, nowMs) {
     var book, now, stale, id, vanished = 0, prevCount = 0, bookEmptied, massVanish, needed,
@@ -47,6 +47,10 @@ var PandaTape = PandaTape || {};
       state.prevAtMs = now;
       return;
     }
+    if (!state.seen) state.seen = {};
+    /* The last block we genuinely saw this order. Evidence older than that cannot explain
+       its disappearance, which is what stops a pre-existing coin being read as proof. */
+    for (i = 0; i < (bookArr || []).length; i++) state.seen[bookArr[i].coinid] = chainBlock;
     for (i = 0; i < (bookArr || []).length; i++) {
       o = bookArr[i];
       ident = T.identity(o);
@@ -78,11 +82,16 @@ var PandaTape = PandaTape || {};
         continue;
       }
       emitted++;
-      if (sink && sink.onFill) sink.onFill(coinid, old, old.minima, old.price, old.sell, false);
+      /* A full disappearance proves nothing on its own. Hand it to the caller as a CANDIDATE so
+         every vanish in this scan can be adjudicated together — evidence has to be exclusive,
+         and that can only be decided across the whole batch. */
+      if (sink && sink.onVanish) sink.onVanish(coinid, old, old.minima, old.price, old.sell, Number(state.seen[coinid] || 0));
+      else if (sink && sink.onFill) sink.onFill(coinid, old, old.minima, old.price, old.sell, false);
     }
     for (id in state.missing) if (state.missing.hasOwnProperty(id) && book[id]) delete state.missing[id];
     for (id in book) if (book.hasOwnProperty(id)) next[id] = book[id];
     for (id in state.missing) if (state.missing.hasOwnProperty(id) && state.prev[id]) next[id] = state.prev[id];
+    for (id in state.seen) if (state.seen.hasOwnProperty(id) && !next[id]) delete state.seen[id];
     state.prev = next;
     state.prevAtMs = now;
   };

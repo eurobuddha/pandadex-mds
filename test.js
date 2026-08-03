@@ -641,4 +641,64 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   assert(meta && meta.sourceKind === "POOL", "a pool-only fill should record source POOL, got " + (meta && meta.sourceKind));
   assert.strictEqual(meta.txpowid, "0xcomposite");
 })();
+/* ---- THE PHANTOM LADDER (reported from mainnet) ----
+   Three 1000-MINIMA ask rungs are cancelled, refunding exactly 1000 MINIMA each to the wallet's
+   payout address. Three 1000-MINIMA bid rungs vanish in the same window. Every order a wallet
+   creates shares that one payout address, so adjudicated INDEPENDENTLY each ask refund "proves
+   payment" for a bid that wants exactly 1000 MINIMA — one cancellation becomes six trades, which
+   is precisely the 1000x6 in the user's tape. Evidence must be exclusive: one coin, one order. */
+(function () {
+  var MYADDR = "0x" + "a".repeat(64), items = [], rows = [], k;
+  function ask(id) { return { coinid:id, wantAddr:MYADDR, locked:PandaDEX.d(1000), lockedTok:"0x00",
+                              wantAmt:PandaDEX.d(5), wantTok:PandaDEX.USDT, created:100 }; }
+  function bidO(id) { return { coinid:id, wantAddr:MYADDR, locked:PandaDEX.d(5), lockedTok:PandaDEX.USDT,
+                               wantAmt:PandaDEX.d(1000), wantTok:"0x00", created:100 }; }
+  for (k = 0; k < 3; k++) {
+    items.push({ coinid:"0xask" + k, order:ask("0xask" + k), since:200 });
+    items.push({ coinid:"0xbid" + k, order:bidO("0xbid" + k), since:200 });
+    rows.push({ coinid:"0xrefund" + k, tokenid:"0x00", amount:"1000", created:205 });   /* the ask refunds */
+  }
+  var byAddr = {}; byAddr[MYADDR] = rows;
+  var verdicts = PandaVerify.adjudicateBatch(byAddr, items, 206);
+  for (k = 0; k < 3; k++) {
+    assert.strictEqual(verdicts["0xask" + k], PandaVerify.CANCELLED, "a cancelled ask must read as cancelled");
+    assert.strictEqual(verdicts["0xbid" + k], PandaVerify.UNKNOWN,
+      "a bid rung claimed another order's refund as its own payment — the phantom bug is back");
+  }
+  /* One genuine payment proves exactly one fill, and cannot be reused by a second order. */
+  var two = [{coinid:"0xb1", order:bidO("0xb1"), since:200}, {coinid:"0xb2", order:bidO("0xb2"), since:200}];
+  var one = {}; one[MYADDR] = [{ coinid:"0xpay", tokenid:"0x00", amount:"1000", created:205 }];
+  var v2 = PandaVerify.adjudicateBatch(one, two, 206);
+  assert.strictEqual([v2["0xb1"], v2["0xb2"]].filter(function (x) { return x === PandaVerify.FILLED; }).length, 1,
+    "one payment coin proved more than one fill");
+  /* Evidence older than the last block the order was alive cannot explain its disappearance. */
+  var stale = {}; stale[MYADDR] = [{ coinid:"0xold", tokenid:"0x00", amount:"1000", created:150 }];
+  assert.strictEqual(PandaVerify.adjudicateBatch(stale, [{coinid:"0xb3", order:bidO("0xb3"), since:200}], 206)["0xb3"],
+    PandaVerify.UNKNOWN, "a coin that predates the vanish was accepted as proof");
+  /* An unreadable reply is never "no evidence" — it must not become a verdict either way. */
+  var blind = {}; blind[MYADDR] = null;
+  assert.strictEqual(PandaVerify.adjudicateBatch(blind, [{coinid:"0xb4", order:bidO("0xb4"), since:200}], 206)["0xb4"],
+    PandaVerify.UNKNOWN);
+})();
+/* ---- our own taker trade: the three evidence gates (native TakerConfirmationTest) ----
+   A consensus-rejected sweep posts without error and never mines, so recording on "posted" writes a
+   permanent phantom keyed by coinid that then blocks the real record. Evidence, not optimism. */
+assert.strictEqual(PandaVerify.coinPresent(null), null);                                   /* no reply = unknown */
+assert.strictEqual(PandaVerify.coinPresent({status:false}), null);                          /* failure = unknown */
+assert.strictEqual(PandaVerify.coinPresent({status:true,response:"nonsense"}), null);       /* unparseable = unknown */
+assert.strictEqual(PandaVerify.coinPresent({status:true,response:[]}), false);              /* genuinely gone */
+assert.strictEqual(PandaVerify.coinPresent({status:true,response:[{coinid:"0x1"}]}), true);
+assert.strictEqual(PandaVerify.coinPresent({status:true,response:{coinid:"0x1"}}), true);
+/* An unknown reply must NEVER be treated as spent — that is how a trade gets recorded that the
+   chain never accepted. */
+assert.notStrictEqual(PandaVerify.coinPresent({status:false}), false);
+/* Proceeds must exist, in the right token, for the exact amount, no older than the posting block. */
+function reply(rows){return {status:true,response:rows};}
+assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:"0x00",amount:"125",created:900}]),"0x00","125",900), true);
+assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:"0x00",amount:"125",created:899}]),"0x00","125",900), false); /* too old */
+assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:"0x00",amount:"124",created:900}]),"0x00","125",900), false); /* wrong amount */
+assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amount:"125",created:900}]),"0x00","125",900), false); /* wrong token */
+assert.strictEqual(PandaVerify.proceedsPresent({status:false},"0x00","125",900), false);
+/* A token payout is measured by tokenamount, not the raw minima amount. */
+assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amount:"1",tokenamount:"0.5578",created:900}]),PandaDEX.USDT,"0.5578",900), true);
 console.log("PandaDEX pure tests passed");

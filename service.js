@@ -4,7 +4,7 @@ MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.lo
 var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, keysReady:false, keysRetryBlock:0, ready:false, scanning:false, rescan:false, busy:false,
   pendingRows:[], pendingRefs:{}, filling:{}, stage:"", stageAtMs:0, busyBlock:0, fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
   stats:{last:null, changePct:null, high:null, low:null, volume:"0", lastFill:null},
-  cancelled:{}, diff:null, restQueue:null, restQueueCoins:null, restQueueBlock:0,
+  cancelled:{}, vanished:[], verifyingFill:false, lastFillLine:"", diff:null, restQueue:null, restQueueCoins:null, restQueueBlock:0,
   pools:[], poolScanning:false, poolHaveLive:false, poolEmptyScans:0,
   maker:{cfg:null, working:false, lastCycleMs:0, pendingIdle:null}, processor:{working:false, startedBlock:0} };
 PDService.SWEEP_DEADLINE_BLOCKS = 6;
@@ -212,10 +212,31 @@ PDService.noteCancelled = function(coinid) {
   MDS.sql("INSERT INTO `cancelled_coins` (`coinid`,`ts`) VALUES ('" + PDService.escSql(coinid) + "'," + Date.now() + ")", function() {});
 };
 PDService.notifyLog = function(message) { try { if (MDS.log) MDS.log("[PandaDEX] " + message); } catch (ignore) {} };
+/* fillMeta lived only in memory: a service restart between posting and confirmation lost the
+   trade permanently, even though pending_state already showed the pattern. */
+PDService.saveFill = function() {
+  var payload = PDService.escSql(JSON.stringify({meta:PDService.fillMeta, coins:PDService.fillCoins, block:PDService.fillBlock}));
+  MDS.sql("CREATE TABLE IF NOT EXISTS `fill_state` (`id` int primary key, `json` clob)", function() {
+    MDS.sql("DELETE FROM `fill_state` WHERE `id`=1", function() {
+      MDS.sql("INSERT INTO `fill_state` (`id`,`json`) VALUES (1,'" + payload + "')", function() {});
+    });
+  });
+};
+PDService.loadFill = function(done) {
+  MDS.sql("CREATE TABLE IF NOT EXISTS `fill_state` (`id` int primary key, `json` clob)", function() {
+    MDS.sql("SELECT `json` FROM `fill_state` WHERE `id`=1", function(res) {
+      var rows = (res && res.rows) || [], raw = null;
+      try { if (rows.length) raw = JSON.parse(rows[0].json || rows[0].JSON || "null"); } catch (ignore) { raw = null; }
+      if (raw && raw.meta) { PDService.fillMeta = raw.meta; PDService.fillCoins = raw.coins || null; PDService.fillBlock = Number(raw.block || 0); }
+      if (done) done();
+    });
+  });
+};
 PDService.recordFill = function() {
   var m = PDService.fillMeta;
   if (!m) return;
-  PDService.fillMeta = null;
+  PDService.fillMeta = null; PDService.saveFill();
+  PDService.lastFillLine = (m.buy ? "Bought " : "Sold ") + PandaDEX.plain(m.size) + " MINIMA @ " + PandaDEX.plain(m.price);
   PandaTape.addMyTrade({spentcoin:m.spentcoin, timems:Date.now(), block:PDService.block, price:m.price,
     size:m.size, buy:m.buy, maker:false, orderid:"", txpowid:m.txpowid || "", sourceKind:m.sourceKind || "BOOK",
     sourceCoinids:(m.sourceCoinids || []).join(" "), verificationStatus:"LOCAL_VERIFIED",
@@ -236,10 +257,29 @@ PDService.recordFill = function() {
    phantom one is not. */
 PDService.recordObservedFill = function(spentCoin, order, size, price, takerBuy, partial) {
   if (partial) return PDService.storeObservedFill(spentCoin, order, size, price, takerBuy, true);
-  PandaVerify.verify(PDService.cmd, order, PDService.block, function(verdict) {
-    if (verdict === PandaVerify.CANCELLED) { PDService.cancelled[spentCoin] = true; return; }
-    if (verdict !== PandaVerify.FILLED) return;
-    PDService.storeObservedFill(spentCoin, order, size, price, takerBuy, false);
+  PDService.queueVanish(spentCoin, order, size, price, takerBuy, 0);
+};
+/* Full disappearances are collected across the whole scan and adjudicated together, because the
+   evidence rule is EXCLUSIVE — one coin can prove at most one order — and that can only be decided
+   once every vanish in the scan is known. Adjudicating them one at a time is what let a single
+   cancelled rung's refund "prove" a fill for every other rung of the same size. */
+PDService.vanished = [];
+PDService.queueVanish = function(spentCoin, order, size, price, takerBuy, since) {
+  PDService.vanished.push({coinid:spentCoin, order:order, size:size, price:price, buy:takerBuy, since:since});
+};
+PDService.settleVanished = function() {
+  var batch = PDService.vanished, i;
+  PDService.vanished = [];
+  if (!batch.length) return;
+  PandaVerify.verifyBatch(PDService.cmd, batch, PDService.block, function(verdicts) {
+    var j, it, verdict;
+    for (j = 0; j < batch.length; j++) {
+      it = batch[j];
+      verdict = verdicts[it.coinid] || PandaVerify.UNKNOWN;
+      if (verdict === PandaVerify.CANCELLED) { PDService.noteCancelled(it.coinid); continue; }
+      if (verdict !== PandaVerify.FILLED) continue;   /* unprovable — never recorded */
+      PDService.storeObservedFill(it.coinid, it.order, it.size, it.price, it.buy, false);
+    }
   });
 };
 PDService.storeObservedFill = function(spentCoin, order, size, price, takerBuy, partial) {
@@ -602,9 +642,30 @@ PDService.processorRun = function(actions, idx) {
     PDService.processorRun(actions, idx + 1);
   });
 };
+/* Ask the node whether every source coin is really gone. Unknown is NOT spent. */
+PDService.allSourcesSpent = function(ids, idx, done) {
+  var id;
+  if (idx >= ids.length) return done(true);
+  id = ids[idx];
+  PDService.cmd("coins simplestate:true coinid:" + id, function(reply) {
+    var present = PandaVerify.coinPresent(reply);
+    if (present === null || present === true) return done(false);   /* unreadable or still there */
+    PDService.allSourcesSpent(ids, idx + 1, done);
+  });
+};
+PDService.proceedsArrived = function(done) {
+  var m = PDService.fillMeta, tok, amount;
+  if (!m || !PDService.identity) return done(false);
+  tok = m.buy ? "0x00" : PandaDEX.USDT;                 /* a buy receives MINIMA, a sell mxUSDT */
+  amount = m.buy ? m.size : PandaDEX.plain(PandaDEX.d(m.size).mul(m.price));
+  PDService.cmd("coins simplestate:true address:" + PDService.identity.address + " tokenid:" + tok +
+    " coinage:0 depth:" + Math.max(12, PDService.SWEEP_DEADLINE_BLOCKS + 6), function(reply) {
+      done(PandaVerify.proceedsPresent(reply, tok, amount, Number(m.postBlock || 0)));
+    });
+};
 PDService.reconcileFill = function(book) {
   var i, j, coinid;
-  if (!PDService.fillCoins) return;
+  if (!PDService.fillCoins || PDService.verifyingFill) return;
   for (i = 0; i < PDService.fillCoins.length; i++) {
     coinid = PDService.fillCoins[i];
     if (PDService.sourceStillLive(book, coinid)) {
@@ -615,9 +676,21 @@ PDService.reconcileFill = function(book) {
       return;
     }
   }
-  PDService.fillCoins = null; PDService.fillBlock = 0; PDService.filling = {};
-  PDService.recordFill();
-  if (!PDService.restQueueCoins) PDService.stage = "Trade confirmed — proceeds are confirming";
+  /* Gate 1 (nothing of ours is still visible) only says the local snapshot agrees. Prove it against
+     the node before claiming LOCAL_VERIFIED: every source coin actually spent, and the proceeds we
+     expected actually present at our address at or after the block we posted in. Until both hold we
+     simply wait — the deadline above is what eventually gives up. */
+  PDService.verifyingFill = true;
+  PDService.allSourcesSpent(PDService.fillCoins.slice(), 0, function(spent) {
+    if (!spent) { PDService.verifyingFill = false; return; }
+    PDService.proceedsArrived(function(arrived) {
+      PDService.verifyingFill = false;
+      if (!arrived) return;
+      PDService.fillCoins = null; PDService.fillBlock = 0; PDService.filling = {};
+      PDService.recordFill();
+      if (!PDService.restQueueCoins) PDService.setStage("\u2713 " + (PDService.lastFillLine || "Trade confirmed") + " \u2014 proceeds are confirming, see ASSETS");
+    });
+  });
 };
 PDService.restReady = function(book) {
   var i, coinid;
@@ -679,7 +752,9 @@ PDService.refresh = function() {
     PDService.scanning = false;
     if (incomplete) PDService.tell("ERROR", {message:"Part of the order book could not be read" + (PDService.book.length ? " — keeping the last good book" : "")});
     visibleBook = incomplete && PDService.book.length ? PDService.book : book;
-    if (PDService.diff) PandaTape.ingest(PDService.diff, visibleBook, incomplete, PDService.block, {onFill:PDService.recordObservedFill});
+    if (PDService.diff) PandaTape.ingest(PDService.diff, visibleBook, incomplete, PDService.block,
+      {onFill:PDService.recordObservedFill, onVanish:PDService.queueVanish});
+    PDService.settleVanished();
     PDService.book = visibleBook;
     if (!incomplete) {
       resolved = PandaPending.resolve(PDService.pendingRows, visibleBook, Date.now());
@@ -773,6 +848,7 @@ PDService.boot = function() {
           /* Load the persisted cancel log alongside boot — it only has to be present before the
              first fill adjudication, which is a refresh away. No extra nesting. */
           PDService.cancelInit(function() {});
+          PDService.loadFill(function() {});
           PDService.diff = PandaTape.newDiff({consume:function(coinid){ return !!PDService.cancelled[coinid]; }});
           PDService.processorInit(function() {
             PDService.pendingInit(function() {
@@ -879,8 +955,9 @@ PDService.limitWithPoolsInner = function(data) {
         PDService.fillBlock = PDService.block;
         PDService.fillMeta = {spentcoin:comp.sourceCoinIds[0], price:PandaDEX.plain(comp.effectivePrice),
           size:PandaDEX.plain(comp.totalMinima), buy:!!data.buy, txpowid:tx || "",
+          postBlock:PDService.block,
           sourceKind:(PandaComposite.poolCount(comp) > 0 && comp.orderTakes.length) ? "BOOK+POOL" : (PandaComposite.poolCount(comp) > 0 ? "POOL" : "BOOK"),
-          sourceCoinids:comp.sourceCoinIds.slice()};
+          sourceCoinids:comp.sourceCoinIds.slice()}; PDService.saveFill();
         PDService.refresh();
       });
     }
@@ -914,8 +991,8 @@ PDService.limitWithPoolsInner = function(data) {
       for (i = 0; i < plan.takes.length; i++) PDService.fillCoins.push(plan.takes[i].order.coinid);
       PDService.fillBlock = PDService.block;
       PDService.fillMeta = {spentcoin:plan.takes[0].order.coinid, price:PandaDEX.plain(plan.average),
-        size:PandaDEX.plain(plan.totalMinima), buy:!!data.buy, txpowid:tx || "", sourceKind:"BOOK",
-        sourceCoinids:PDService.fillCoins.slice()};
+        size:PandaDEX.plain(plan.totalMinima), buy:!!data.buy, txpowid:tx || "", postBlock:PDService.block, sourceKind:"BOOK",
+        sourceCoinids:PDService.fillCoins.slice()}; PDService.saveFill();
       PDService.refresh();
     });
   }
