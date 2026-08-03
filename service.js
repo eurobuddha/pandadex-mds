@@ -208,8 +208,17 @@ PDService.cancelInit = function(done) {
 };
 PDService.noteCancelled = function(coinid) {
   if (!coinid) return;
+  /* The in-memory map is authoritative for this session, so a lost write cannot resurrect a
+     phantom before the next restart. */
   PDService.cancelled[coinid] = true;
-  MDS.sql("INSERT INTO `cancelled_coins` (`coinid`,`ts`) VALUES ('" + PDService.escSql(coinid) + "'," + Date.now() + ")", function() {});
+  MDS.sql("INSERT INTO `cancelled_coins` (`coinid`,`ts`) VALUES ('" + PDService.escSql(coinid) + "'," + Date.now() + ")", function() {
+    /* An MDS write can fail while its callback still reports success, so confirm by reading it
+       back. Losing this row means a cancel is re-adjudicated later as a possible fill. */
+    MDS.sql("SELECT `coinid` FROM `cancelled_coins` WHERE `coinid`='" + PDService.escSql(coinid) + "'", function(res) {
+      var rows = (res && res.rows) || [];
+      if (!rows.length) PDService.notifyLog("cancel log write was lost for " + coinid + " — it will not survive a restart");
+    });
+  });
 };
 PDService.notifyLog = function(message) { try { if (MDS.log) MDS.log("[PandaDEX] " + message); } catch (ignore) {} };
 /* fillMeta lived only in memory: a service restart between posting and confirmation lost the
@@ -858,6 +867,9 @@ PDService.boot = function() {
      holding MDS.sql by reference detached a Java method and broke every signing path. */
   /* Let the transaction layer narrate. Without this the UI shows one line for the whole chain. */
   PandaTxn.stage = function(message) { PDService.setStage(message); };
+  /* And let it refuse an owner key this wallet does not hold, rather than sending it to the node
+     and surfacing "Public Key not found". Only meaningful once the key set is actually readable. */
+  PandaTxn.holdsKey = function(publickey) { return !PDService.keysUsable() || !!PDService.keyset[publickey]; };
   PDService.cmd("runscript script:" + PDService.scriptArg(), function(scriptResult) {
     var script = scriptResult && scriptResult.response && scriptResult.response.script;
     if (!scriptResult.status || !scriptResult.response.parseok || !script || String(script.address).toUpperCase() !== PandaDEX.ADDR.toUpperCase())

@@ -232,15 +232,37 @@ PandaSignLock.gate("holder",function(release){
 });
 assert.strictEqual(gatedDuring,false);   /* the send waited for the holder to release */
 assert(calls.some(function(c){return c.indexOf("send ")===0&&c.indexOf("address:"+PandaDEX.ADDR)>0;}));
-/* A transaction over the node's size limit is refused before txncheck, and the stored txn is
-   always deleted — never left behind in txnlist. An unreadable txnexport is NOT a failure. */
+/* The canonical post sequence is txnsign -> txnbasics -> txnpost, as Limit and pandapools both do.
+   txnexport was an extra round-trip on the critical path that no proven MDS app makes. */
 calls=[];outcome=null;
-function bigCmd(command,cb){calls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x"+"ab".repeat(70*1024)}});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xposted"}});cb({status:true});}
-PandaTxn.cancel(bigCmd,sell,function(err,tx){outcome={err:err,tx:tx};});
-assert(outcome.err&&outcome.err.indexOf("too large")>0);
-assert(!calls.some(function(c){return c.indexOf("txncheck")===0;}));   /* refused before validation */
-assert(calls.some(function(c){return c.indexOf("txndelete")===0;}));   /* and cleaned up */
-assert.strictEqual(PandaSignLock.busy(),false);                        /* and the gate was released */
+PandaTxn.cancel(fakeCmd,sell,function(err,tx){outcome={err:err,tx:tx};});
+assert.deepStrictEqual(outcome,{err:null,tx:"0xposted"});
+assert(!calls.some(function(c){return c.indexOf("txnexport")===0;}),"txnexport is back on the critical path");
+assert(calls.indexOf("txnbasics id:"+calls[0].split("id:")[1])>calls.map(function(c){return c.indexOf("txnsign")===0;}).indexOf(true));
+
+/* A locked vault fails EVERY signature and is an ordinary state on a node left locked. Limit says
+   what to do about it; we used to surface the raw node error, which explains nothing. */
+assert(PandaTxn.signError("Vault is LOCKED").indexOf("vault is LOCKED")>0);
+assert(PandaTxn.signError("signing failed: Public Key not found").indexOf("not finished preparing")>0);
+assert.strictEqual(PandaTxn.signError("some other problem"),"");
+calls=[];outcome=null;
+function lockedCmd(command,cb){calls.push(command);if(command.indexOf("txnsign")===0)return cb({status:false,error:"Wallet is LOCKED"});cb({status:true});}
+PandaTxn.cancel(lockedCmd,sell,function(err){outcome=err;});
+assert(outcome&&outcome.indexOf("vault is LOCKED")>0,"a locked vault must name itself, got: "+outcome);
+assert(calls.some(function(c){return c.indexOf("txndelete")===0;}),"a failed sign must still clean up");
+assert.strictEqual(PandaSignLock.busy(),false);
+
+/* Keys materialise asynchronously; signing with an owner key this wallet does not hold must be
+   refused before it reaches the node, not surfaced as a raw error afterwards. */
+PandaTxn.holdsKey=function(k){return k==="0xabc";};
+calls=[];outcome=null;
+var foreign=cloneOrder(C,"0xforeign","10",100); foreign.ownerPk="0xsomeoneelse";
+PandaTxn.cancel(fakeCmd,foreign,function(err){outcome=err;});
+assert(outcome&&outcome.indexOf("does not hold the key")>0,"a foreign owner key must be refused up front");
+assert.strictEqual(calls.length,0,"nothing should reach the node when the key is not held");
+calls=[];outcome=null;PandaTxn.cancel(fakeCmd,sell,function(err,tx){outcome={err:err,tx:tx};});
+assert.deepStrictEqual(outcome,{err:null,tx:"0xposted"},"a key we DO hold must still sign");
+PandaTxn.holdsKey=null;
 /* SelfSplit — exact command shape (native SelfSplitTest). MINIMA omits tokenid entirely; a token
    split puts tokenid before split. And it signs, so it must sit behind the gate. */
 assert.strictEqual(PandaSplit.command("0xme","0x00","5"),"send address:0xme amount:5 split:10");

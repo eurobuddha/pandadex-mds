@@ -2,17 +2,39 @@ var PandaTxn = PandaTxn || {};
 (function (T, P) {
   T.run = function (cmd, steps, fail, done, n) { n=n||0; if(n>=steps.length)return done(null); cmd(steps[n],function(r){if(!r||!r.status){if(fail)cmd("txndelete id:"+fail,function(){});return done((r&&r.error)||("Failed: "+steps[n]));}T.run(cmd,steps,fail,done,n+1);}); };
   T.id = function (prefix) { return prefix+"_"+Date.now()+"_"+Math.floor(Math.random()*1000000000); };
-  T.MAX_TX_BYTES = 60 * 1024;
   /* Narration hook. The service points this at PDService.setStage so a trade reports what it is
      actually doing instead of showing one frozen line for minutes. No-op by default. */
   T.stage = function () {};
   T.MAX_FUNDING_INPUTS = 8;
+  /* Limit/service.js checks the sign error for LOCK and says what to do about it. A locked vault
+     fails EVERY signature, and on a node left locked that is an ordinary state — reporting the raw
+     node error just tells the user something broke. minima-skills.md also records the other common
+     one: keys materialise asynchronously, so signing too soon gives "Public Key not found". */
+  T.signError = function (raw) {
+    var e = String(raw || "");
+    if (e.toUpperCase().indexOf("LOCK") >= 0)
+      return "Your node vault is LOCKED — unlock it in Minima, then try again. Nothing was sent.";
+    if (e.toUpperCase().indexOf("PUBLIC KEY NOT FOUND") >= 0)
+      return "The node has not finished preparing that order's key yet — wait for the next block and try again. Nothing was sent.";
+    return "";
+  };
+  /* An order can belong to an older wallet key. Refuse before we reach the node if that key is not
+     one this wallet holds, so the failure names itself instead of arriving as a raw node error. */
+  T.holdsKey = null;   /* service sets this to a function(publickey) -> boolean */
+  T.ownerKeyMissing = function (keys) {
+    var i;
+    if (typeof T.holdsKey !== "function") return null;
+    for (i = 0; i < keys.length; i++) if (keys[i] !== "auto" && !T.holdsKey(keys[i])) return keys[i];
+    return null;
+  };
   /* `signKey` may be one key, an array of keys (a batch cancel needs one signature per distinct
      owner), or nothing at all — which means `auto`. Every build->sign->post chain in this file
      funnels through here, so this is where the serial signing gate is held. See signlock.js: two
      concurrent signs of one Winternitz key reuse a leaf and leak it. */
   T.checkPost = function (cmd,id,steps,done,signKey) {
-    var keys = signKey ? (Array.isArray(signKey)?signKey:[signKey]) : ["auto"];
+    var keys = signKey ? (Array.isArray(signKey)?signKey:[signKey]) : ["auto"], missing;
+    missing = T.ownerKeyMissing(keys);
+    if (missing) return done("This wallet does not hold the key that owns that order (" + missing.substring(0, 12) + "…). Nothing was sent.");
     T.stage("Waiting for the signing lock…");
     PandaSignLock.gate("dex", function (release) {
       /* Release exactly once, on every exit path — success, validation failure, post rejection
@@ -24,19 +46,13 @@ var PandaTxn = PandaTxn || {};
       /* txncheck is the only command whose response is the validation verdict. Do not infer
        * validity from txnlist or txnpost: the latter merely means mempool acceptance. */
       T.stage("Signing " + steps.length + " step" + (steps.length===1?"":"s") + "…");
-      T.run(cmd,steps,id,function(err){ if(err)return finish(err);
+      T.run(cmd,steps,id,function(err){ if(err)return finish(T.signError(err) || err);
         T.stage("Checking the transaction before it is sent…");
-        /* Size gate before the validation gate. A transaction over the node's limit is rejected
-           at post with a far less useful error, and composite fills (pool pairs + order coins +
-           funding) are exactly the shape that overflows. A txnexport we cannot read is not
-           treated as a failure — only a size we can read and know is too big. */
-        cmd("txnexport id:"+id,function(exp){
-          var data=exp&&exp.response&&(exp.response.data||exp.response.txndata||exp.response.transaction), bytes=0;
-          if(typeof data==="string") bytes=Math.floor((data.indexOf("0x")===0?data.length-2:data.length)/2);
-          if(bytes>T.MAX_TX_BYTES){
-            cmd("txndelete id:"+id,function(){});
-            return finish("Transaction is too large ("+Math.round(bytes/1024)+"KB) — reduce the number of orders or consolidate your wallet coins");
-          }
+        /* Straight to validation. An earlier version called `txnexport` here to size-check the
+           transaction, but no proven MDS app does — Limit and pandapools both post
+           txnsign -> txnbasics -> txnpost, which is also the canonical sequence in the reference
+           notes. It was an extra round-trip and an extra failure surface on the one path that has
+           broken repeatedly, for a guard the covenant's own order cap already bounds. */
         cmd("txncheck id:"+id,function(check){
           /* Mirror Android's proven gate. `validamounts` is the Minima verdict field;
              older node responses carry it beside `valid`, not inside it. */
@@ -55,7 +71,6 @@ var PandaTxn = PandaTxn || {};
           }
           T.stage("Posting to the network…");
           cmd("txnpost id:"+id,function(post){if(!post||(!post.status&&!post.pending)){cmd("txndelete id:"+id,function(){});return finish((post&&post.error)||"Transaction was not accepted");}cmd("txndelete id:"+id,function(){});finish(null,post.response&&post.response.txpowid||id);});
-        });
         });
       });
     }, function (blocked) { done(blocked); });
@@ -98,7 +113,7 @@ var PandaTxn = PandaTxn || {};
   T.create = function(cmd,identity,input,done){var minima=P.down(input.minima,P.DP),price=P.d(input.price),usdt=P.up(minima.mul(price),P.DP),buy=!!input.buy,lock=buy?usdt:minima,want=buy?minima:usdt,minimaRem=P.down(input.minRem||0,P.DP),minRem=buy?P.up(minimaRem.mul(price),P.DP):minimaRem;if(minima.lt(P.MIN_ORDER)||lock.gt(P.MAX_ORDER)||want.gt(P.MAX_ORDER))return done("Order size is outside the permitted range");if(minRem.gt(lock))return done("Minimum remainder is larger than the order itself");/* `send` signs internally, so it needs the gate exactly as much as a txnsign chain does —
      this is the case SignGate.java's javadoc singles out. The `random` call below is read-only
      and deliberately stays outside it. */
-  function sendOrder(oid){var state={"0":identity.publickey,"1":identity.address,"2":P.plain(want),"3":buy?"0x00":P.USDT,"4":oid,"5":buy?"0":"1","6":P.plain(price),"7":input.gtc===false?"0":"1","8":P.plain(minRem)};T.stage("Waiting for the signing lock…");PandaSignLock.gate("send",function(release){T.stage("Signing and sending the order…");cmd("send amount:"+P.plain(lock)+" address:"+P.ADDR+(buy?" tokenid:"+P.USDT:"")+" state:"+JSON.stringify(state),function(r){release.free();done((!r||(!r.status&&!r.pending))&&((r&&r.error)||"Order was not accepted"),r&&r.response&&r.response.txpowid,oid);});},function(blocked){done(blocked);});}if(input.orderId)return sendOrder(input.orderId);cmd("random",function(rand){var oid=rand&&rand.status&&rand.response&&rand.response.random;if(!oid)return done("Could not create a safe order id");sendOrder(oid);});};
+  function sendOrder(oid){var state={"0":identity.publickey,"1":identity.address,"2":P.plain(want),"3":buy?"0x00":P.USDT,"4":oid,"5":buy?"0":"1","6":P.plain(price),"7":input.gtc===false?"0":"1","8":P.plain(minRem)};T.stage("Waiting for the signing lock…");PandaSignLock.gate("send",function(release){T.stage("Signing and sending the order…");cmd("send amount:"+P.plain(lock)+" address:"+P.ADDR+(buy?" tokenid:"+P.USDT:"")+" state:"+JSON.stringify(state),function(r){release.free();done((!r||(!r.status&&!r.pending))&&(T.signError(r&&r.error)||(r&&r.error)||"Order was not accepted"),r&&r.response&&r.response.txpowid,oid);});},function(blocked){done(blocked);});}if(input.orderId)return sendOrder(input.orderId);cmd("random",function(rand){var oid=rand&&rand.status&&rand.response&&rand.response.random;if(!oid)return done("Could not create a safe order id");sendOrder(oid);});};
   T.fill = function(cmd,identity,plan,done){
     if(!plan||!plan.takes||!plan.takes.length)return done("Nothing to fill");
     var buy=plan.takes[0].order.sell,payTok=buy?P.USDT:"0x00",needed=P.d(0),i,t,o,partial=null,proceeds=P.d(0),steps=[],id=T.id("sweep"),exclude={};

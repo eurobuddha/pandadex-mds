@@ -10,7 +10,7 @@ covenant, the same orders, so a MiniDapp user and an APK user trade with each ot
 
 > **This is development software. It moves real funds on mainnet. Use at your own risk.**
 
-MiniDapp `0.4.1` tracks native PandaDEX `0.3.9`.
+MiniDapp `0.4.2` tracks native PandaDEX `0.3.9`.
 
 ## What it does
 
@@ -85,6 +85,17 @@ untouched) and `contract/COMPOSITE_LIVE_INTEROP.md`.
 | `explorer.js` | Optional third-party txpow confirmation. |
 | `service.js` | The background service: the sole owner of chain and transactions. |
 | `test.js` | `node test.js` — pure regression tests, no node required. |
+
+## Running PandaDEX on more than one node
+
+**Do not run the same wallet seed on two nodes at once.** Minima signs with WOTS+ one-time keys and
+each node keeps its **own** `uses` counter; two nodes on one seed will hand out the same leaf twice,
+and a reused leaf must be treated as compromised. This is the dominant real-world cause of key reuse
+— ahead of anything an app does — and no in-app signing gate can prevent it, because neither node
+knows about the other.
+
+If you run the MiniDapp on a node and the Android app on a phone, give them separate seeds. They
+still trade with each other: the order book is on-chain, not in the wallet.
 
 ## Fund-safety design
 
