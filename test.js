@@ -827,7 +827,7 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
 (function () {
   var fmt = function (v) { return PandaDEX.d(v).toDecimalPlaces(8).toFixed(); }, m, z, line;
 
-  m = PandaBalance.meta({response:{sendable:"7.5", confirmed:"10", unconfirmed:"2.25", coins:4}}, 5000);
+  m = PandaBalance.meta({status:true,response:{sendable:"7.5", confirmed:"10", unconfirmed:"2.25", coins:4}}, 5000);
   assert(m.sendable.eq("7.5") && m.confirmed.eq("10") && m.unconfirmed.eq("2.25"), "balance figures mis-parsed");
   assert(PandaBalance.locked(m).eq("2.5"), "locked must be confirmed minus sendable");
   assert.strictEqual(m.coins, 4);
@@ -841,20 +841,19 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
 
   /* sendable can EXCEED confirmed on a node counting mempool change; locked must floor at zero
      rather than render as a negative "locked" figure. */
-  assert(PandaBalance.locked(PandaBalance.meta({sendable:"5", confirmed:"3"})).eq(0), "locked must floor at zero");
+  assert(PandaBalance.locked(PandaBalance.meta({status:true,response:{sendable:"5", confirmed:"3"}})).eq(0), "locked must floor at zero");
 
-  /* Absent sendable falls back to confirmed — an older node that does not report it must not read
-     as a wallet with nothing spendable. */
-  assert(PandaBalance.meta({confirmed:"9"}).sendable.eq("9"), "missing sendable must fall back to confirmed");
-  assert.strictEqual(PandaBalance.meta({confirmed:"1", coinamount:6}).coins, 6, "coinamount is the fallback key");
-  assert.strictEqual(PandaBalance.meta({confirmed:"1", coins:"bad"}).coins, 0);
+  /* Absent sendable cannot promote confirmed funds into a spendable balance. */
+  assert(PandaBalance.meta({status:true,response:{confirmed:"9"}}).at===0, "missing sendable must remain unknown");
+  assert.strictEqual(PandaBalance.meta({status:true,response:{confirmed:"1", sendable:"1", coinamount:6}}).coins, 6, "coinamount is the fallback key");
+  assert.strictEqual(PandaBalance.meta({status:true,response:{confirmed:"1",sendable:"1", coins:"bad"}}).coins, 0);
 
   /* The four figures must all appear, and each must be labelled as itself. */
   line = PandaBalance.line(m, fmt, 5000 + 90 * 1000);
   ["confirmed 10", "locked ≈ 2.5", "unconfirmed 2.25", "4 coins", "updated 1m ago"].forEach(function (part) {
     assert(line.indexOf(part) >= 0, "balance line is missing: " + part + "  (" + line + ")");
   });
-  assert(PandaBalance.line(PandaBalance.meta({confirmed:"1", coins:1}, 1), fmt, 1).indexOf("1 coin ") >= 0);
+  assert(PandaBalance.line(PandaBalance.meta({status:true,response:{confirmed:"1",sendable:"1", coins:1}}, 1), fmt, 1).indexOf("1 coin ") >= 0);
   assert.strictEqual(PandaBalance.age(0, 0), "never");
   assert.strictEqual(PandaBalance.age(30 * 1000, 0 + 1) , "29s ago");
   assert.strictEqual(PandaBalance.age(3 * 3600 * 1000, 1), "2h ago");
@@ -862,7 +861,7 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   /* A shortfall must say WHY the rest is unusable — otherwise "you have 7.5 sendable" next to a
      10 balance reads as a bug in the app. */
   assert.strictEqual(PandaBalance.unavailable(m, fmt), " (2.5 confirmed locked, 2.25 unconfirmed)");
-  assert.strictEqual(PandaBalance.unavailable(PandaBalance.meta({confirmed:"5", sendable:"5"}), fmt), "");
+  assert.strictEqual(PandaBalance.unavailable(PandaBalance.meta({status:true,response:{confirmed:"5", sendable:"5"}}), fmt), "");
 
   /* Coin count gates ladder speed: one coin funds one rung per block. */
   assert(PandaBalance.fundingHint(4, 0, 1, 9).indexOf("1 coin for 4 ask rungs") >= 0);
@@ -991,7 +990,7 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
 (function () {
   var nodes={}, messages=[], tasks=[], page=fs.readFileSync("index.html","utf8"), script=page.slice(page.indexOf('var PANDADEX_VERSION'),page.lastIndexOf('</script>'));
   function node(id) { return nodes[id] || (nodes[id]={textContent:"",innerHTML:"",className:"",hidden:false,open:false,offsetHeight:90,style:{},setAttribute:function(){},showModal:function(){this.open=true;},close:function(){this.open=false;}}); }
-  var scope={Decimal:Decimal,PandaDEX:PandaDEX,PandaStats:PandaStats,PandaBalance:PandaBalance,
+  var scope={Decimal:Decimal,PandaSafety:PandaSafety,PandaDEX:PandaDEX,PandaStats:PandaStats,PandaBalance:PandaBalance,
     PandaComposite:PandaComposite,PandaPool:PandaPool,PandaSynthetic:PandaSynthetic,
     document:{getElementById:node,body:{className:"",style:{}},querySelectorAll:function(){return[];}},
     localStorage:{getItem:function(){return null;},setItem:function(){}},window:{console:console},
@@ -1020,6 +1019,16 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   scope.depthCache.key="current";scope.depthCache.requestedKey="current";scope.renderBookOnly();
   assert.strictEqual(node("spread").textContent,"0.004400","best displayed level combines book and pool sizes once");
   scope.depthCache.requestedKey="next";scope.renderBookOnly();assert.strictEqual(node("spread").textContent,"—","stale pool depth cannot produce a current weighted price");
+  var balanceCalls=[];scope.MDS.cmd=function(command,callback){balanceCalls.push({command:command,callback:callback});};
+  scope.balances();assert.strictEqual(balanceCalls.length,2);assert.strictEqual(balanceCalls[0].command,"balance tokenid:0x00");
+  balanceCalls[0].callback({status:true,response:[{tokenid:"0x00",confirmed:"10",sendable:"8",coins:"2"}]});
+  balanceCalls[1].callback({status:true,response:[]});var observed=scope.balancesState.minima;
+  assert.strictEqual(node("minima").textContent,"8");assert.strictEqual(node("usdt").textContent,"0");
+  scope.balances();balanceCalls[2].callback({status:false,response:[]});
+  assert.strictEqual(scope.balancesState.minima,observed,"a failed read preserves the previous observation and age");
+  balanceCalls[3].callback({status:true,response:[{tokenid:"0x00",confirmed:"99",sendable:"99"}]});
+  assert.strictEqual(node("usdt").textContent,"0","a wrong-token response cannot update the card");
+
 })();
 /* Native TransactionHardeningTest: missing or malformed verdicts cannot authorize posting. */
 (function(){
@@ -1078,5 +1087,17 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   PandaCoinLock.finishInputs(["0x99aa","0x99bb","0x99cc"]);PandaCoinLock.release([{coinid:"0x99aa"},{coinid:"0x99bb"},{coinid:"0x99cc"}]);assert(!PandaCoinLock.isReserved("0x99aa"));
   var sent=[], result;
   PandaTxn.checkPost(function(c,cb){sent.push(c);cb({status:true});},"duplicate",["txncreate id:duplicate","txninput id:duplicate coinid:0x99dd","txninput id:duplicate coinid:0x99DD"],function(e){result=e;});assert(result);assert.strictEqual(sent.length,0);
+})();
+/* Native BalanceDisplayTest strict read cases. */
+(function(){
+  function row(){return {tokenid:"0x00",confirmed:"10",sendable:"8",unconfirmed:"0",coins:"2"};}
+  ["confirmed","sendable","unconfirmed","coins"].forEach(function(field){["bad","-1",true,{},"1e999999"].forEach(function(value){var r=row();r[field]=value;assert.strictEqual(PandaBalance.meta({status:true,response:r},1000,"0x00").at,0);});});
+  ["1.5","2147483648"].forEach(function(value){var r=row();r.coins=value;assert.strictEqual(PandaBalance.meta({status:true,response:r},1000).at,0);});
+  assert.strictEqual(PandaBalance.meta({status:false,response:row()},1000,"0x00").at,0);
+  assert.strictEqual(PandaBalance.meta({status:true,response:row()},1000,PandaDEX.USDT).at,0);
+  assert.strictEqual(PandaBalance.meta({status:true,response:[row(),row()]},1000,"0x00").at,0);
+  assert.strictEqual(PandaBalance.meta({status:true,response:[]},1000,"0x00").at,0);
+  var zero=PandaBalance.meta({status:true,response:[]},1000,PandaDEX.USDT);assert.strictEqual(zero.at,1000);assert(zero.sendable.eq(0));
+  assert.strictEqual(PandaBalance.meta({status:false,response:[]},1000,PandaDEX.USDT).at,0);
 })();
 console.log("PandaDEX pure tests passed");

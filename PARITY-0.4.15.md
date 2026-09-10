@@ -38,3 +38,9 @@ Ported native `FundingCoins`, `CoinLock` and bounded `Util.decOr` parsing. Fundi
 Removed the obsolete `txnexport` size gate to match current APK `DexTxn.checkAndPost`: the node applies the chain's actual serialized TxPoW limit at `txnpost`. Its size error and actual limit are retained in the message.
 
 `node test.js` passed, including the existing service boot/book fill/pool fill integration harness, native funding vectors, count/read failures, tokenamount requirements, crowded-address avoidance, slice recounts, duplicate inputs, claim expiry and node-size rejection. Older mock coin IDs were corrected to valid hexadecimal values; assertions now fail at the transaction callback with its actual error. `git diff --check` passed. No MDS package has been published from these intermediate commits.
+
+## 0.4.10 validation
+
+Ported native `MainActivity.balanceMeta` and `AssetsTab` behavior. Both tokens are queried separately; failed, wrong-token, ambiguous or malformed replies remain unknown. Valid empty non-native token responses are observed zero. Existing observations and timestamps survive failed refreshes. Missing sendable no longer falls back to confirmed, and an unloaded card/total renders unknown.
+
+`node test.js` passed with native balance vectors and the actual page callbacks exercised under the VM harness: scoped queries, retained observations after failure and wrong-token rejection. Existing NEWBLOCK/NEWBALANCE refresh checks remain. No contract timing changes.

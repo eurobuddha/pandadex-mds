@@ -43,20 +43,21 @@ var PandaBalance = PandaBalance || {};
     return (resp && typeof resp === "object") ? resp : null;
   };
 
-  /* Never throws and never returns partial figures — a missing reply reads as an all-zero wallet
-     rather than leaving the last good numbers on screen under a fresh timestamp. */
-  B.meta = function (input, nowMs) {
-    var row = B.row(input), out = { sendable: d(0), confirmed: d(0), unconfirmed: d(0), coins: 0, at: 0 }, n;
-    if (!row) return out;
-    out.confirmed = d(row.confirmed);
-    /* `balance` reports TOKEN units in sendable/confirmed for both Minima and tokens. */
-    out.sendable = (row.sendable === undefined || row.sendable === null || row.sendable === "")
-      ? out.confirmed : d(row.sendable);
-    out.unconfirmed = d(row.unconfirmed);
-    n = Number(row.coins !== undefined && row.coins !== null ? row.coins : row.coinamount);
-    out.coins = (isFinite(n) && n > 0) ? Math.floor(n) : 0;
-    out.at = Number(nowMs || Date.now());
-    return out;
+  /* MainActivity.balanceMeta: a failed or incomplete read is unknown, never fresh zero. */
+  B.meta = function(input, nowMs, expectedToken) {
+    var out={sendable:d(0),confirmed:d(0),unconfirmed:d(0),coins:0,at:0}, resp, row, confirmed, sendable, unconfirmed, coins;
+    if(!input || !PandaSafety.truthy(input.status) || (expectedToken&&!PandaSafety.hex(expectedToken)))return out;
+    resp=input.response;
+    if(Array.isArray(resp)) {
+      if(!resp.length) { if(expectedToken&&!PandaDEX.eqTok(expectedToken,"0x00"))out.at=Number(nowMs||Date.now());return out; }
+      if(resp.length!==1)return out;row=resp[0];
+    } else row=resp;
+    if(!row||typeof row!=="object" || (expectedToken&&!PandaDEX.eqTok(row.tokenid,expectedToken)))return out;
+    confirmed=PandaSafety.decimal(row.confirmed);sendable=PandaSafety.decimal(row.sendable);
+    unconfirmed=PandaSafety.decimal(row.unconfirmed===undefined?"0":row.unconfirmed);
+    coins=PandaSafety.decimal(row.coins!==undefined?row.coins:row.coinamount!==undefined?row.coinamount:0);
+    if(!confirmed||!sendable||!unconfirmed||!coins||confirmed.lt(0)||sendable.lt(0)||unconfirmed.lt(0)||coins.lt(0)||!coins.isInteger()||coins.gt(2147483647))return out;
+    out.confirmed=confirmed;out.sendable=sendable;out.unconfirmed=unconfirmed;out.coins=coins.toNumber();out.at=Number(nowMs||Date.now());return out;
   };
 
   B.locked = function (meta) {
@@ -79,6 +80,7 @@ var PandaBalance = PandaBalance || {};
 
   B.line = function (meta, fmt, nowMs) {
     var SEP = "  ·  ";
+    if(!meta || !meta.at)return "Balance not loaded. Connect to MinimaCore and wait for an update.";
     return "confirmed " + fmt(meta.confirmed)
       + SEP + "locked ≈ " + fmt(B.locked(meta))
       + SEP + "unconfirmed " + fmt(meta.unconfirmed)
