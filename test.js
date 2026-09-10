@@ -639,6 +639,13 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   assert(meta && meta.spentcoin === "0xbid1", "the fill was not recorded for reconciliation");
   assert.strictEqual(meta.sourceKind, "BOOK");
   assert.strictEqual(meta.txpowid, "0xposted");
+  vmmod.runInContext("PDService.busy=true; PDService.setStage('Signing transaction'); PDService.stageAtMs=Date.now()-60000",sandbox);
+  assert.strictEqual(vmmod.runInContext("PDService.stageNow()",sandbox),"Signing transaction");
+  vmmod.runInContext("for(var logTest=0;logTest<65;logTest++)PDService.setStage('Fixture '+logTest)",sandbox);
+  assert.strictEqual(vmmod.runInContext("PDService.activityLog.length",sandbox),60);
+  vmmod.runInContext("PDService.setStage('Fixture 64')",sandbox);
+  assert.strictEqual(vmmod.runInContext("PDService.activityLog.length",sandbox),60);
+
 })();
 /* Same harness, now with a live PandaPools pool — the blended path that failed on mainnet. */
 (function () {
@@ -977,4 +984,51 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   assert(page.indexOf("saveTextFile") < 0, "the per-file download path must be gone");
 })();
 
+/* Native WeightedBookPriceTest cases, using the MDS Decimal implementation. */
+(function () {
+  function weighted(b, bs, a, as) { var p=PandaStats.weightedBookPrice(b,bs,a,as); return p===null?null:p.toFixed(6); }
+  assert.strictEqual(weighted("0.00439","100","0.00443","100"),"0.004410");
+  assert.strictEqual(weighted("0.00439","300","0.00443","100"),"0.004400");
+  assert.strictEqual(weighted("0.00439","100","0.00443","300"),"0.004420");
+  assert.strictEqual(weighted(null,null,"0.00443","10"),"0.004430");
+  assert.strictEqual(weighted("0.00439","10",null,null),"0.004390");
+  assert.strictEqual(weighted(null,null,null,null),null);
+  assert.strictEqual(weighted("0","100","1","0"),null);
+  assert(PandaStats.weightedBookPrice("0.004391234567","0.00000001","0.004439876543","0.00000001").eq("0.004415555555"));
+})();
+/* Execute the actual page functions with the existing VM approach: held service messages must
+   not delay local feedback; the same open dialog must change without being recreated. */
+(function () {
+  var nodes={}, messages=[], tasks=[], page=fs.readFileSync("index.html","utf8"), script=page.slice(page.indexOf('var PANDADEX_VERSION'),page.lastIndexOf('</script>'));
+  function node(id) { return nodes[id] || (nodes[id]={textContent:"",innerHTML:"",className:"",hidden:false,open:false,offsetHeight:90,style:{},setAttribute:function(){},showModal:function(){this.open=true;},close:function(){this.open=false;}}); }
+  var scope={Decimal:Decimal,PandaDEX:PandaDEX,PandaStats:PandaStats,PandaBalance:PandaBalance,
+    PandaComposite:PandaComposite,PandaPool:PandaPool,PandaSynthetic:PandaSynthetic,
+    document:{getElementById:node,body:{className:"",style:{}},querySelectorAll:function(){return[];}},
+    localStorage:{getItem:function(){return null;},setItem:function(){}},window:{console:console},
+    MDS:{init:function(){},comms:{solo:function(m){messages.push(JSON.parse(m));}}},
+    setInterval:function(){},setTimeout:function(f){tasks.push(f);},console:console};
+  vm.createContext(scope); vm.runInContext(script,scope,{filename:"index-inline.js"});
+  scope.send("LIMIT",{buy:true,minima:"10",price:"0.00443"});
+  assert.strictEqual(messages.length,1); assert(!node("activityLog").hidden);
+  assert(node("logRecent").textContent.indexOf("Request sent: LIMIT")>=0,"feedback must precede a service callback");
+  scope.showActivityLog(); var dialog=node("activityLogDialog"); assert(dialog.open);
+  scope.state={busy:true,logSession:"session-a",activityLog:[{id:1,at:1000,text:"Signing transaction"}]};
+  scope.ingestActivity(scope.state);
+  assert(dialog.open && node("logFull").textContent.indexOf("Signing transaction")>=0);
+  scope.state.activityLog.unshift({id:2,at:2000,text:"Submitted; checking on-chain"}); scope.ingestActivity(scope.state);
+  assert.strictEqual(node("activityLogDialog"),dialog); assert(dialog.open);
+  assert(node("logFull").textContent.split("\n\n")[0].indexOf("Submitted; checking on-chain")>=0);
+  var count=scope.activityLines.length; scope.ingestActivity(scope.state); assert.strictEqual(scope.activityLines.length,count);
+  scope.stageText="Signing";scope.stageAt=Date.now()-60000;assert.strictEqual(scope.liveStage(),"Signing");
+  scope.state.busy=false;scope.state.awaitingFill=true;assert.strictEqual(scope.liveStage(),"Signing");
+  scope.state.awaitingFill=false;assert.strictEqual(scope.liveStage(),"");
+  for(var i=0;i<65;i++)scope.appendActivity("Fixture "+i,Date.now());assert.strictEqual(scope.activityLines.length,60);
+  scope.appendActivity('<img src=x onerror=bad()>',Date.now());assert(node("logFull").textContent.indexOf('<img')>=0);assert.strictEqual(node("logFull").innerHTML,"");
+  assert.strictEqual(scope.document.body.style.paddingBottom,"114px","fixed log reserves scroll space for controls");
+  scope.state={block:200,book:[{sell:false,price:"0.00439",minima:"100",created:190},{sell:true,price:"0.00443",minima:"60",created:190}],pools:[{}]};
+  scope.poolDepth=function(sell){return sell?[{price:"0.00443",poolMinima:"40"}]:[{price:"0.00439",poolMinima:"200"}];};
+  scope.depthCache.key="current";scope.depthCache.requestedKey="current";scope.renderBookOnly();
+  assert.strictEqual(node("spread").textContent,"0.004400","best displayed level combines book and pool sizes once");
+  scope.depthCache.requestedKey="next";scope.renderBookOnly();assert.strictEqual(node("spread").textContent,"—","stale pool depth cannot produce a current weighted price");
+})();
 console.log("PandaDEX pure tests passed");

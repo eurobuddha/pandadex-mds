@@ -39,3 +39,15 @@ PandaStats.lastFill = function(rows, nowMs) {
   age = Math.max(0, nowMs - best.timems);
   return {price:PandaDEX.plain(best.price), ageMs:age};
 };
+
+/* PriceMath.weightedBookPrice: best displayed levels, same-side MINIMA sizes. */
+PandaStats.weightedBookPrice = function(bid, bidSize, ask, askSize) {
+  var value = PandaDEX.d(0), size = PandaDEX.d(0);
+  function add(p, n) {
+    if (p === null || p === undefined || n === null || n === undefined) return;
+    p = PandaDEX.d(p); n = PandaDEX.d(n);
+    if (p.gt(0) && n.gt(0)) { value = value.add(p.mul(n)); size = size.add(n); }
+  }
+  add(bid, bidSize); add(ask, askSize);
+  return size.gt(0) ? value.div(size).toDecimalPlaces(12, Decimal.ROUND_HALF_UP) : null;
+};

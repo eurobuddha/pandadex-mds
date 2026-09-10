@@ -1,8 +1,10 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PandaDEX</title><link rel="stylesheet" href="fonts.css"><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="parity.css"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,interactive-widget=resizes-content"><title>PandaDEX</title><link rel="stylesheet" href="fonts.css"><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="parity.css"></head>
 <body>
-<header class="topbar"><div class="brand"><h1>◆ PANDADEX</h1></div><div class="chrome-pills"><span id="versionPill" class="pill">v0.4.6</span><button id="themePill" class="pill pill-button" onclick="toggleTheme()" aria-label="Toggle theme">☀</button><span id="nodePill" class="pill">PAIRING…</span><span id="blockPill" class="pill"># —</span><button class="icon-button" onclick="send('REFRESH')" aria-label="Refresh">↻</button></div></header>
+<header class="topbar"><div class="brand"><h1>◆ PANDADEX</h1></div><div class="chrome-pills"><span id="versionPill" class="pill">v0.4.7</span><button id="themePill" class="pill pill-button" onclick="toggleTheme()" aria-label="Toggle theme">☀</button><span id="nodePill" class="pill">PAIRING…</span><span id="blockPill" class="pill"># —</span><button class="icon-button" onclick="send('REFRESH')" aria-label="Refresh">↻</button></div></header>
 <main>
+  <button id="activityLog" class="activity-log" type="button" onclick="showActivityLog()" hidden><strong id="logTitle">ACTIVITY LOG · tap for log</strong><span id="logRecent" aria-live="polite"></span></button>
+  <dialog id="activityLogDialog"><h2>Activity log</h2><pre id="logFull" aria-live="polite"></pre><button type="button" onclick="document.getElementById('activityLogDialog').close()">Close</button></dialog>
   <div id="status" class="notice loading">Connecting to Minima…</div>
   <section class="wallet-strip"><div><label>BLOCK</label><strong id="block">—</strong></div><div><label>MINIMA</label><strong id="minima">—</strong></div><div><label>mxUSDT</label><strong id="usdt">—</strong></div></section>
   <nav class="app-tabs"><button data-view="trade" class="active" onclick="switchView('trade')">TRADE</button><button data-view="chartView" onclick="switchView('chartView')">CHART</button><button data-view="tapeView" onclick="switchView('tapeView')">TRADES</button><button data-view="ordersView" onclick="switchView('ordersView')">ORDERS</button><button data-view="assetsView" onclick="switchView('assetsView')">ASSETS</button><button data-view="makerView" onclick="switchView('makerView')">MAKER</button></nav>
@@ -36,7 +38,7 @@
   <section id="tapeView" class="view-pane"><div class="mini-seg"><button id="myTapeBtn" class="active" onclick="tapeSub=0;renderTapePage()">MY TRADES</button><button id="mktTapeBtn" onclick="tapeSub=1;renderTapePage()">MARKET TAPE</button></div><div id="tapePage"></div></section>
 </main>
 <script src="mds.js"></script><script src="decimal.js"></script><script src="covenant.js"></script><script src="balance.js"></script><script src="book.js"></script><script src="pool.js"></script><script src="composite.js"></script><script src="maker.js"></script><script src="pending.js"></script><script src="zip.js"></script><script src="export.js"></script><script src="explorer.js"></script><script src="stats.js"></script><script>
-var PANDADEX_VERSION = "0.4.6";
+var PANDADEX_VERSION = "0.4.7";
 var state = {}, balancesState = {}, isBuy = true, gtcOn = true, ordersSub = 0, tapeSub = 0, chartSel = 1, chartSelected = -1, makerHydrated = false, CHARTS = [900000,3600000,14400000,86400000], GROUPS = ["0.00001", "0.0001", "0.001", "0.01"], groupIdx = Number(localStorage.getItem("pandadex_group") || 0);
 function el(id) { return document.getElementById(id); }
 /* HTML-escaping is NOT JS-string escaping. Inside onclick="fn('...')" the parser decodes
@@ -53,7 +55,15 @@ function tickPrice(value, sellLevel) { var d=num(value); if(!d) return null; ret
 function num(value) { try { if(value===undefined||value===null||value===""||value==="—") return null; return PandaDEX.d(value); } catch (error) { return null; } }
 function dec(value, fallback) { var d=num(value); return d || num(fallback===undefined?0:fallback) || PandaDEX.d(0); }
 function ago(ms) { var s=Math.floor(Number(ms||0)/1000), m, h, d; if(s<60)return s+"s ago"; m=Math.floor(s/60); if(m<60)return m+(m===1?" minute ago":" minutes ago"); h=Math.floor(m/60); if(h<24)return h+(h===1?" hour ago":" hours ago"); d=Math.floor(h/24); return d+(d===1?" day ago":" days ago"); }
-function send(type, data) { MDS.comms.solo(JSON.stringify({origin:"ui",type:type,data:data || {}}), function(){}); }
+/* Show acceptance immediately, before the service can spend a block waiting for a callback.
+   This is feedback only; it does not add a pending-trade guard. */
+function send(type, data) {
+  if (["LIMIT","CANCEL","CANCEL_ALL","EDIT","SPLIT","MAKER_PUBLISH","MAKER_APPLY","MAKER_WITHDRAW"].indexOf(type) >= 0) {
+    appendActivity("Request sent: " + type.replace(/_/g," "), Date.now());
+    setStageText("Request sent — waiting for the node"); paintNotice();
+  }
+  MDS.comms.solo(JSON.stringify({origin:"ui",type:type,data:data || {}}), function(){});
+}
 function commPrivate(message) { var d=message&&message.data; return !(d&&String(d.public).toLowerCase()==="true"); }
 function commPacket(message) { var d=message&&message.data, raw; if(!d) return null; raw=typeof d==="string"?d:(d.message!==undefined?d.message:(d.msg!==undefined?d.msg:(d.data!==undefined?d.data:d))); if(typeof raw==="string") { try { return JSON.parse(raw); } catch(error) { return null; } } return raw&&typeof raw==="object"?raw:null; }
 /* A stage line must never sit there lying. Native holds one for 45 seconds then renders nothing,
@@ -61,7 +71,35 @@ function commPacket(message) { var d=message&&message.data, raw; if(!d) return n
    "Building blended transaction…" for minutes because it was painted once and never revisited. */
 var STAGE_HOLD_MS = 45000, stageText = "", stageAt = 0;
 function setStageText(s) { s = s || ""; if (s !== stageText) { stageText = s; stageAt = Date.now(); } }
-function liveStage() { return stageText && Date.now() - stageAt <= STAGE_HOLD_MS ? stageText : ""; }
+function liveStage() { return stageText && (state.busy || state.awaitingFill || Date.now() - stageAt <= STAGE_HOLD_MS) ? stageText : ""; }
+var activityLines = [], lastServiceLog = 0, serviceLogSession = "";
+function appendActivity(text, at) {
+  text = String(text || "").slice(0,512);
+  if (!text) return;
+  if (activityLines.length && activityLines[0].text === text) return;
+  activityLines.unshift({at:Number(at || Date.now()), text:text});
+  if (activityLines.length > 60) activityLines.length = 60;
+  renderActivityLog();
+}
+function ingestActivity(snapshot) {
+  var rows = snapshot.activityLog || [], i, row;
+  if (serviceLogSession !== snapshot.logSession) { lastServiceLog = 0; serviceLogSession = snapshot.logSession; }
+  for (i = rows.length - 1; i >= 0; i--) {
+    row = rows[i];
+    if (row && Number(row.id) > lastServiceLog) { appendActivity(row.text, row.at); lastServiceLog = Number(row.id); }
+  }
+  renderActivityLog();
+}
+function renderActivityLog() {
+  var lines = activityLines.map(function(row) { return new Date(row.at).toLocaleTimeString() + "  " + row.text; });
+  if (!el("activityLog")) return;
+  el("activityLog").hidden = !lines.length;
+  el("logTitle").textContent = (state.busy ? "TRANSACTION IN PROGRESS" : state.awaitingFill ? "CHECKING ON-CHAIN" : "ACTIVITY LOG") + " · tap for log";
+  el("logRecent").textContent = lines.slice(0,3).join("\n");
+  if (el("logFull").textContent !== lines.join("\n\n")) el("logFull").textContent = lines.join("\n\n");
+  document.body.style.paddingBottom = lines.length ? (el("activityLog").offsetHeight + 24) + "px" : "";
+}
+function showActivityLog() { renderActivityLog(); if (!el("activityLogDialog").open) el("activityLogDialog").showModal(); }
 function paintNotice() {
   var s = liveStage();
   notice(s || (state.ready ? "Live V5 book \u00b7 block " + (state.block || "\u2014") : "Starting PandaDEX\u2026"),
@@ -92,7 +130,8 @@ function tradeMid() { var mid=bookMid(), poolMid; if(mid) return mid; try { if(A
    chosen tick, and the pools' own reserves. Native solved the same CPU problem with a background
    depth worker that paints the last completed snapshot; the page has no threads, so on failure we
    keep the previous snapshot rather than blanking the ladder. */
-var depthCache = {key:null, asks:[], bids:[], pending:false};
+var depthCache = {key:null, requestedKey:null, asks:[], bids:[], pending:false};
+var bestDisplayed = {ask:null, bid:null};
 /* Sampling pool depth walks the curve and re-plans through the router to prove every band is
    executable. Even after the 0.3.6 speedups that is hundreds of milliseconds with several pools,
    and it used to run INSIDE the paint — which froze the whole app for tens of seconds on every
@@ -104,6 +143,7 @@ function poolDepth(sell) {
   var pools = Array.isArray(state.pools) ? state.pools : [], key, i, p;
   key = String(state.block || 0) + "|" + groupIdx + "|" + pools.length;
   for (i = 0; i < pools.length; i++) { p = pools[i] || {}; key += "|" + p.address + ":" + p.reserveM + ":" + p.reserveT; }
+  depthCache.requestedKey = key;
   if (!pools.length) { depthCache.asks = []; depthCache.bids = []; depthCache.key = key; return []; }
   if (depthCache.key !== key && !depthCache.pending) {
     depthCache.pending = true;
@@ -126,10 +166,15 @@ function renderBookOnly() {
   if (!el("asks") || !el("bids")) return;
   el("asks").innerHTML = renderBookRows(rows, true);
   el("bids").innerHTML = renderBookRows(rows, false);
+  var bid = bestDisplayed.bid, ask = bestDisplayed.ask;
+  var weighted = depthCache.key !== depthCache.requestedKey ? null : PandaStats.weightedBookPrice(
+    bid && bid.price, bid && bid.size, ask && ask.price, ask && ask.size);
+  el("spread").textContent = weighted === null ? "—" : fmtPrice(weighted);
+  el("spread").setAttribute("aria-label", "Size-weighted price of the best displayed bid and offer, including pool and limit liquidity");
 }
 function levelPrice(row) { var price=num(row&&row.price), tick=GROUPS[groupIdx], d, q; if(!price) return null; if(!tick) return price.toDecimalPlaces(6, Decimal.ROUND_HALF_UP); d=dec(tick); q=sellSideFor(row)?price.div(d).ceil():price.div(d).floor(); return q.mul(d); }
 function sellSideFor(row) { return !!row.sell; }
-function renderBookRows(rows, sell) { var map={}, keys=[], out=[], max=PandaDEX.d(0), running=PandaDEX.d(0), cum={}, i, row, key, level, amount, total, mineIds={}, mine=Array.isArray(state.mine)?state.mine:[], filling=state.filling || {}, depth, pools=Array.isArray(state.pools)?state.pools:[], poolRows=[], poolAmt, amtText, age, price, minima, usdt, prefill; rows=Array.isArray(rows)?rows:[]; for(i=0;i<mine.length;i++) if(mine[i]&&mine[i].coinid) mineIds[mine[i].coinid]=true; for(i=0;i<rows.length;i++) { row=rows[i]||{}; price=num(row.price); minima=num(row.minima); if(!price||!minima) continue; usdt=num(row.usdt); if(!usdt) usdt=price.mul(minima); age=Math.max(0,Number(state.block||0)-Number(row.created||0)); if(row.sell!==sell || age>PandaDEX.EXPIRY) continue; level=levelPrice(row); if(!level) continue; key=level.toFixed(); if(!map[key]) { map[key]={price:level,minima:PandaDEX.d(0),poolMinima:PandaDEX.d(0),usdt:PandaDEX.d(0),exact:price,mine:false,filling:false}; keys.push(key); } map[key].minima=map[key].minima.add(minima); map[key].usdt=map[key].usdt.add(usdt); if(mineIds[row.coinid]) map[key].mine=true; if(filling[row.coinid]) map[key].filling=true; if(sell && price.lt(map[key].exact)) map[key].exact=price; if(!sell && price.gt(map[key].exact)) map[key].exact=price; } poolRows=poolDepth(sell); for(i=0;i<poolRows.length;i++){row=poolRows[i]||{};price=num(row.price);poolAmt=num(row.poolMinima);if(!price||!poolAmt)continue;key=price.toFixed();if(!map[key]){map[key]={price:price,minima:PandaDEX.d(0),poolMinima:PandaDEX.d(0),usdt:PandaDEX.d(0),exact:price,mine:false,filling:false};keys.push(key);}map[key].poolMinima=map[key].poolMinima.add(poolAmt);map[key].usdt=map[key].usdt.add(poolAmt.mul(map[key].price));} keys.sort(function(a,b){ return sell ? PandaDEX.d(a).cmp(PandaDEX.d(b)) : PandaDEX.d(b).cmp(PandaDEX.d(a)); }); if(keys.length>10) keys=keys.slice(0,10); for(i=0;i<keys.length;i++) { amount=map[keys[i]].minima.add(map[keys[i]].poolMinima); max=max.add(amount); running=running.add(amount); cum[keys[i]]=running; } if(sell) keys.reverse(); for(i=0;i<keys.length;i++) { row=map[keys[i]]; amount=row.minima.add(row.poolMinima); total=row.price.mul(amount).toDecimalPlaces(4,Decimal.ROUND_CEIL); depth=max.gt(0)?Math.max(8, cum[keys[i]].div(max).mul(100).toNumber()):8; amtText=row.poolMinima.gt(0)&&row.minima.gt(0)?'BOOK '+fmtDown(row.minima,2)+'<br>POOL '+fmtDown(row.poolMinima,2):(row.poolMinima.gt(0)?'POOL '+fmtDown(row.poolMinima,2):fmtDown(row.minima,2)); prefill=tickPrice(row.exact,sell)||fmtPrice(row.price); out.push('<div class="book-row '+(sell?'ask':'bid')+(row.filling?' filling':'')+'" onclick="prefillPrice(\''+jsArg(prefill)+'\')"><i style="width:'+depth.toFixed(2)+'%"></i><span>'+(row.mine?'• ':'')+fmtPrice(row.price)+'</span><span>'+amtText+'</span><span>'+(row.filling?'FILLING…':fmt(total))+'</span></div>'); } return out.length?out.join(""):'<div class="empty-row">No '+(sell?'asks':'bids')+' yet</div>'; }
+function renderBookRows(rows, sell) { var map={}, keys=[], out=[], max=PandaDEX.d(0), running=PandaDEX.d(0), cum={}, i, row, key, level, amount, total, mineIds={}, mine=Array.isArray(state.mine)?state.mine:[], filling=state.filling || {}, depth, pools=Array.isArray(state.pools)?state.pools:[], poolRows=[], poolAmt, amtText, age, price, minima, usdt, prefill; rows=Array.isArray(rows)?rows:[]; for(i=0;i<mine.length;i++) if(mine[i]&&mine[i].coinid) mineIds[mine[i].coinid]=true; for(i=0;i<rows.length;i++) { row=rows[i]||{}; price=num(row.price); minima=num(row.minima); if(!price||!minima) continue; usdt=num(row.usdt); if(!usdt) usdt=price.mul(minima); age=Math.max(0,Number(state.block||0)-Number(row.created||0)); if(row.sell!==sell || age>PandaDEX.EXPIRY) continue; level=levelPrice(row); if(!level) continue; key=level.toFixed(); if(!map[key]) { map[key]={price:level,minima:PandaDEX.d(0),poolMinima:PandaDEX.d(0),usdt:PandaDEX.d(0),exact:price,mine:false,filling:false}; keys.push(key); } map[key].minima=map[key].minima.add(minima); map[key].usdt=map[key].usdt.add(usdt); if(mineIds[row.coinid]) map[key].mine=true; if(filling[row.coinid]) map[key].filling=true; if(sell && price.lt(map[key].exact)) map[key].exact=price; if(!sell && price.gt(map[key].exact)) map[key].exact=price; } poolRows=poolDepth(sell); for(i=0;i<poolRows.length;i++){row=poolRows[i]||{};price=num(row.price);poolAmt=num(row.poolMinima);if(!price||!poolAmt)continue;key=price.toFixed();if(!map[key]){map[key]={price:price,minima:PandaDEX.d(0),poolMinima:PandaDEX.d(0),usdt:PandaDEX.d(0),exact:price,mine:false,filling:false};keys.push(key);}map[key].poolMinima=map[key].poolMinima.add(poolAmt);map[key].usdt=map[key].usdt.add(poolAmt.mul(map[key].price));} keys.sort(function(a,b){ return sell ? PandaDEX.d(a).cmp(PandaDEX.d(b)) : PandaDEX.d(b).cmp(PandaDEX.d(a)); }); if(keys.length>10) keys=keys.slice(0,10); bestDisplayed[sell?"ask":"bid"] = keys.length ? {price:map[keys[0]].price,size:map[keys[0]].minima.add(map[keys[0]].poolMinima)} : null; for(i=0;i<keys.length;i++) { amount=map[keys[i]].minima.add(map[keys[i]].poolMinima); max=max.add(amount); running=running.add(amount); cum[keys[i]]=running; } if(sell) keys.reverse(); for(i=0;i<keys.length;i++) { row=map[keys[i]]; amount=row.minima.add(row.poolMinima); total=row.price.mul(amount).toDecimalPlaces(4,Decimal.ROUND_CEIL); depth=max.gt(0)?Math.max(8, cum[keys[i]].div(max).mul(100).toNumber()):8; amtText=row.poolMinima.gt(0)&&row.minima.gt(0)?'BOOK '+fmtDown(row.minima,2)+'<br>POOL '+fmtDown(row.poolMinima,2):(row.poolMinima.gt(0)?'POOL '+fmtDown(row.poolMinima,2):fmtDown(row.minima,2)); prefill=tickPrice(row.exact,sell)||fmtPrice(row.price); out.push('<div class="book-row '+(sell?'ask':'bid')+(row.filling?' filling':'')+'" onclick="prefillPrice(\''+jsArg(prefill)+'\')"><i style="width:'+depth.toFixed(2)+'%"></i><span>'+(row.mine?'• ':'')+fmtPrice(row.price)+'</span><span>'+amtText+'</span><span>'+(row.filling?'FILLING…':fmt(total))+'</span></div>'); } return out.length?out.join(""):'<div class="empty-row">No '+(sell?'asks':'bids')+' yet</div>'; }
 function prefillPrice(price) { var p=tickPrice(price,null); if(!p) return; el("price").value=p; preview(); }
 function pendingCard(row) { var kind=row.kind||"", side=row.buy?"BUY":"SELL", phrase=kind==="CANCEL"?"CANCELLING":(kind==="EDIT"?"UPDATING":"MINING"), text=kind==="CANCEL"?"gone when a block confirms it (~50s)":(kind==="EDIT"?"new price live when a block confirms it (~50s)":"on the book when a block confirms it (~50s)"); return '<article class="order-card '+(row.buy?'buy-order':'sell-order')+' is-pending pending-row"><div class="order-top"><div><span class="side">'+side+'</span><strong>'+fmt(row.minima)+' MINIMA <b>@</b> '+fmtPrice(row.price)+'</strong></div><div class="order-buttons"><button disabled>'+phrase+'…</button></div></div><div class="order-meta"><span>⏳ '+phrase+' — '+text+'</span><span>'+esc(PandaPending.status(row,Date.now()))+'</span></div></article>'; }
 function makerOrderMap() { var cfg=state.maker&&state.maker.cfg||{}, slots=cfg.slots||{}, out={}, k; if(!cfg.armed) return out; for(k in slots) if(slots.hasOwnProperty(k)&&slots[k]&&slots[k].orderId) out[slots[k].orderId]=true; return out; }
@@ -207,7 +252,7 @@ function chartPriceY(max, min, range, price) { return max.sub(price).div(range).
 function renderChartPage() { var buttons=document.querySelectorAll("#chartPills button"), cs=chartCandles(), plot=el("chartPlot"), i, c, max=null, min=null, range, left, width, high, low, open, close, top, bottom, cls, html=[], volMax=PandaDEX.d(0), volH, tick, price, y, lastY, labelIdx, x, posCls; if(!plot) return; for(i=0;i<buttons.length;i++) buttons[i].className=Number(buttons[i].getAttribute("data-chart"))===chartSel?"active":""; if(!cs.length) { chartSelected=-1; el("chartReadout").textContent=""; plot.innerHTML='<div class="empty-card"><strong>No candles yet</strong><span>Confirmed fills will build the chart from this node forward.</span></div>'; return; } for(i=0;i<cs.length;i++) { c=cs[i]; max=max?Decimal.max(max,c.high):c.high; min=min?Decimal.min(min,c.low):c.low; volMax=Decimal.max(volMax,c.volume); } range=max.sub(min); if(!range.gt(0)) range=PandaDEX.d(1); html.push('<div class="chart-canvas">'); for(i=0;i<5;i++) { tick=PandaDEX.d(i).div(4); price=max.sub(range.mul(tick)); y=tick.mul(100).toNumber(); html.push('<span class="chart-grid" style="top:'+y+'%;"></span><span class="chart-axis-label" style="top:'+y+'%;">'+fmtPrice(price)+'</span>'); } lastY=chartPriceY(max,min,range,cs[cs.length-1].close); html.push('<span class="last-line" style="top:'+lastY+'%;"></span><span class="last-label" style="top:'+lastY+'%;">'+fmtPrice(cs[cs.length-1].close)+'</span>'); width=Math.max(2,90/cs.length); for(i=0;i<cs.length;i++) { c=cs[i]; left=(i*100/cs.length); high=chartPriceY(max,min,range,c.high); low=chartPriceY(max,min,range,c.low); open=chartPriceY(max,min,range,c.open); close=chartPriceY(max,min,range,c.close); top=Math.min(open,close); bottom=Math.max(open,close); cls=c.close.gte(c.open)?"up":"down"; volH=volMax.gt(0)?c.volume.div(volMax).mul(18).toNumber():0; html.push('<button class="candle '+cls+'" onmouseenter="showCandle('+i+')" onfocus="showCandle('+i+')" onclick="showCandle('+i+')" style="left:'+left+'%;width:'+width+'%;"><i style="top:'+high+'%;height:'+Math.max(1,low-high)+'%;"></i><b style="top:'+top+'%;height:'+Math.max(1,bottom-top)+'%;"></b></button>'); html.push('<span class="vol-bar '+cls+'" style="left:'+left+'%;width:'+width+'%;height:'+Math.max(1,volH)+'%;"></span>'); } html.push('</div>'); labelIdx=[0,Math.floor((cs.length-1)/2),cs.length-1]; for(i=0;i<labelIdx.length;i++) { x=cs.length===1?50:(labelIdx[i]*100/(cs.length-1)); posCls=i===0?" first":(i===2?" last":""); html.push('<span class="time-label'+posCls+'" style="left:'+x+'%;">'+chartTime(cs[labelIdx[i]].openMs, CHARTS[chartSel]===86400000)+'</span>'); } plot.innerHTML=html.join(""); showCandle(chartSelected>=0&&chartSelected<cs.length?chartSelected:cs.length-1); }
 function renderAllPages() { renderOrdersPage(); renderAssetsPage(); renderTapePage(); renderChartPage(); renderMakerPage(); }
 function renderTicker() { var s=state.stats||{}, lf=s.lastFill, ch=s.changePct===null||s.changePct===undefined?null:num(s.changePct), up; el("syncDot").textContent=state.ready?"● live":"● syncing"; el("syncDot").className=state.ready?"in":""; if(lf&&lf.price!==undefined){el("lastPrice").textContent=fmtPrice(lf.price); el("lastPrice").className=""; el("priceKind").textContent="last trade · "+ago(lf.ageMs); } else { el("lastPrice").textContent="—"; el("lastPrice").className=""; el("priceKind").textContent="no trades observed yet"; } if(ch){ up=ch.gte(0); el("delta").textContent=(up?"+":"")+ch.toFixed(2)+"%"; el("delta").className=up?"in":"out"; } else { el("delta").textContent=""; el("delta").className=""; } el("high24").textContent=s.high?fmtPrice(s.high):"—"; el("low24").textContent=s.low?fmtPrice(s.low):"—"; el("vol24").textContent=s.volume?fmt(s.volume):"—"; }
-function render() { var rows=Array.isArray(state.book)?state.book:[], mine=Array.isArray(state.mine)?state.mine:[], mid, status; updateChrome(); el("block").textContent=state.block || "—"; renderTicker(); mid=tradeMid(); renderBookOnly(); el("spread").textContent=mid?fmtPrice(mid):"—"; el("mine").innerHTML=renderOrders(mine); renderAllPages(); setStageText(state.stage); paintNotice(); }
+function render() { var rows=Array.isArray(state.book)?state.book:[], mine=Array.isArray(state.mine)?state.mine:[], mid, status; updateChrome(); el("block").textContent=state.block || "—"; renderTicker(); renderBookOnly(); el("mine").innerHTML=renderOrders(mine); renderAllPages(); ingestActivity(state); setStageText(state.stage); paintNotice(); }
 function balances() { MDS.cmd("balance",function(result) { var rows=result && result.response || [], i, row; rows=Array.isArray(rows)?rows:(rows?[rows]:[]); for(i=0;i<rows.length;i++) { row=rows[i]||{}; if(row.tokenid==="0x00") { balancesState.minima=PandaBalance.meta(row); el("minima").textContent=balancesState.minima.sendable.toFixed(); } if(PandaDEX.eqTok(row.tokenid,PandaDEX.USDT)) { balancesState.usdt=PandaBalance.meta(row); el("usdt").textContent=balancesState.usdt.sendable.toFixed(); } } renderAssetsPage(); }); }
 applyTheme(); updateChrome();
 setInterval(function () {
@@ -227,5 +272,5 @@ setInterval(function () {
    the snapshot taken the moment a trade's proceeds arrived — reporting them unconfirmed
    indefinitely, long after they had settled and become spendable. Native polls on NEWBLOCK as
    well (MainActivity:221), as does pandapools-mds; we did not. */
-MDS.init(function(message) { var packet; if(message.event==="inited") { mergeTrade(); restyleGroups(); balances(); send("REFRESH"); chooseSide(true); } else if(message.event==="NEWBLOCK"||message.event==="NEWBALANCE") balances(); else if(message.event==="MDSCOMMS" && commPrivate(message)) { try { packet=commPacket(message); if(!packet||packet.origin!=="service") return; if(packet.type==="STATE") { state=packet.data||{}; render(); } else if(packet.type==="ERROR") notice(packet.data&&packet.data.message?packet.data.message:"Service error","error"); else if(packet.type==="POSTED") notice(packet.data&&packet.data.message?packet.data.message:"Posted","posted"); } catch(error) { if(window.console&&console.error) console.error(error); notice("Service update render error: "+(error&&error.message?error.message:error),"error"); } } });
+MDS.init(function(message) { var packet; if(message.event==="inited") { mergeTrade(); restyleGroups(); balances(); send("REFRESH"); chooseSide(true); } else if(message.event==="NEWBLOCK"||message.event==="NEWBALANCE") balances(); else if(message.event==="MDSCOMMS" && commPrivate(message)) { try { packet=commPacket(message); if(!packet||packet.origin!=="service") return; if(packet.type==="STATE") { state=packet.data||{}; render(); } else if(packet.type==="ERROR" || packet.type==="POSTED") { var text=packet.data&&packet.data.message?packet.data.message:(packet.type==="ERROR"?"Service error":"Posted"); appendActivity(text,Date.now()); notice(text,packet.type==="ERROR"?"error":"posted"); } } catch(error) { if(window.console&&console.error) console.error(error); notice("Service update render error: "+(error&&error.message?error.message:error),"error"); } } });
 </script></body></html>

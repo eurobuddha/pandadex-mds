@@ -2,7 +2,7 @@
 MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("pool.js"); MDS.load("composite.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js"); MDS.load("split.js"); MDS.load("history.js");
 
 var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, keysReady:false, keysRetryBlock:0, ready:false, scanning:false, rescan:false, busy:false,
-  pendingRows:[], pendingRefs:{}, filling:{}, stage:"", stageAtMs:0, busyBlock:0, fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
+  activityLog:[], logSequence:0, logSession:String(Date.now()), lastLogMessage:"", pendingRows:[], pendingRefs:{}, filling:{}, stage:"", stageAtMs:0, busyBlock:0, fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
   stats:{last:null, changePct:null, high:null, low:null, volume:"0", lastFill:null},
   cancelled:{}, vanished:[], verifyingFill:false, lastFillLine:"", diff:null, restQueue:null, restQueueCoins:null, restQueueBlock:0,
   pools:[], poolScanning:false, poolHaveLive:false, poolEmptyScans:0,
@@ -114,13 +114,22 @@ PDService.snapshot = function() {
   PDService.tell("STATE", {ready:PDService.ready, block:PDService.block, identity:PDService.identity,
     book:PDService.book, pools:PDService.pools, poolsSyncing:!PDService.poolHaveLive, mine:mine, pending:PDService.pendingRefs, pendingRows:PDService.pendingRows,
     filling:PDService.filling, stats:PDService.stats,
-    stage:PDService.stageNow(), busy:PDService.busy, tape:PDService.tape, myTrades:PDService.myTrades,
+    activityLog:PDService.activityLog, logSession:PDService.logSession, awaitingFill:!!PDService.fillMeta, stage:PDService.stageNow(), busy:PDService.busy, tape:PDService.tape, myTrades:PDService.myTrades,
     maker:PDService.makerPublic()});
 };
-PDService.setStage = function(message) { PDService.stage = message || ""; PDService.stageAtMs = Date.now(); PDService.snapshot(); };
+PDService.setStage = function(message) {
+  var text = String(message || "");
+  PDService.stage = text; PDService.stageAtMs = Date.now();
+  if (text && text !== PDService.lastLogMessage) {
+    PDService.activityLog.unshift({id:++PDService.logSequence, at:PDService.stageAtMs, text:text.slice(0,512)});
+    if (PDService.activityLog.length > 60) PDService.activityLog.length = 60;
+    PDService.lastLogMessage = text;
+  }
+  PDService.snapshot();
+};
 PDService.stageNow = function() {
   if (!PDService.stage) return "";
-  return Date.now() - Number(PDService.stageAtMs || 0) > PDService.STAGE_HOLD_MS ? "" : PDService.stage;
+  return !PDService.busy && !PDService.fillMeta && Date.now() - Number(PDService.stageAtMs || 0) > PDService.STAGE_HOLD_MS ? "" : PDService.stage;
 };
 /* Mark the start of a fund-moving action so the block clock can free it if its callback is lost. */
 PDService.setBusy = function(on) { PDService.busy = !!on; PDService.busyBlock = on ? PDService.block : 0; };
