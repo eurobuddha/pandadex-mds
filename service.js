@@ -1,5 +1,5 @@
 /* ES5 service: the sole chain/transaction owner. Never touches the DOM. */
-MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("pool.js"); MDS.load("composite.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js"); MDS.load("split.js"); MDS.load("history.js");
+MDS.load("safety.js"); MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("pool.js"); MDS.load("composite.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js"); MDS.load("split.js"); MDS.load("history.js");
 
 var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, keysReady:false, keysRetryBlock:0, ready:false, scanning:false, rescan:false, busy:false,
   activityLog:[], logSequence:0, logSession:String(Date.now()), lastLogMessage:"", pendingRows:[], pendingRefs:{}, filling:{}, stage:"", stageAtMs:0, busyBlock:0, fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
@@ -42,7 +42,14 @@ PDService.notifyPending = function(event) {
   else if (event.type === "settled" && row.kind === PandaPending.CANCEL) PDService.notify("Order cancelled: funds are back in your wallet");
   else if (event.type === "settled" && row.kind === PandaPending.EDIT) PDService.notify("New price live: " + line);
 };
-PDService.cmd = function(command, callback) { MDS.cmd(command, function(result) { callback(result || {status:false,error:"No node response"}); }); };
+PDService.cmd = function(command, callback) {
+  var failure=PandaSafety.commandFailure(command), called=false;
+  if (failure) return callback({status:false,error:failure});
+  MDS.cmd(command, function(result) {
+    if (called) return; called=true;
+    callback(result || {status:false,error:"No node response",transporterror:true});
+  });
+};
 PDService.escSql = function(value) { return String(value).replace(/'/g, "''"); };
 PDService.maybeDec = function(value) {
   try {
@@ -900,7 +907,7 @@ PDService.boot = function() {
               PDService.loadMaker(function() {
                 PDService.loadTape(function() {
                   PDService.ready = true;
-                  PDService.cmd("block", function(blockResult) { PDService.block = Number(blockResult && blockResult.response && blockResult.response.block || 0); PDService.refresh(); });
+                  PDService.cmd("block", function(blockResult) { var tip=PandaSafety.tipBlock(blockResult); if(tip>0) { PDService.block=tip; PDService.refresh(); } });
                 });
               });
             });
@@ -1108,7 +1115,7 @@ PDService.actionRest = function(message) {
 MDS.init(function(message) {
   var packet;
   if (message.event === "inited") PDService.boot();
-  else if (message.event === "NEWBLOCK") PDService.cmd("block", function(result) { PDService.block = Number(result && result.response && result.response.block || PDService.block); PDService.refresh(); });
+  else if (message.event === "NEWBLOCK") PDService.cmd("block", function(result) { var tip=PandaSafety.tipBlock(result); if(tip>0) { PDService.block=tip; PDService.refresh(); } });
   else if (message.event === "MDSCOMMS" && message.data && !message.data.public) {
     try { packet = JSON.parse(message.data.message || "{}"); if (packet.origin === "ui") PDService.action(packet); }
     catch (error) { PDService.tell("ERROR", {message:"Bad request"}); }

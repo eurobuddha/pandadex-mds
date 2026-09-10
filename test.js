@@ -1,7 +1,7 @@
 /* Pure regression tests; run with `node test.js`. */
 var assert=require("assert"), fs=require("fs"), vm=require("vm");
 global.Decimal=require("./decimal.js");
-["covenant.js","balance.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js","zip.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
+["safety.js","covenant.js","balance.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js","zip.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
 var C={coinid:"0x1",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xabc","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
 var poison=JSON.parse(JSON.stringify(C)); poison.state["3"]="0x00"; assert.strictEqual(PandaDEX.order(poison),null);
@@ -154,7 +154,7 @@ assert(wholePlan.orderTakes.length===1&&wholePlan.orderTakes[0].partial===false)
 assert(PandaPool.scriptArg("LET fx=MAX(dx 0)*5/1000").indexOf("*5/1000")>0);
 assert.strictEqual(PandaPool.scriptArg('a"b'),'"a\\"b"');
 var builtCalls=[], builtOutcome=null;
-function comboCmd(command, cb){builtCalls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("coins relevant:true")===0)return cb({status:true,response:[{coinid:"0xfund",tokenid:PandaDEX.USDT,tokenamount:"1",amount:"1",address:"0xfunder"}]});if(command.indexOf("newscript")===0)return cb({status:true});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xcombo"}});cb({status:true});}
+function comboCmd(command, cb){builtCalls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("coins relevant:true")===0)return cb({status:true,response:[{coinid:"0xfund",tokenid:PandaDEX.USDT,tokenamount:"1",amount:"1",address:"0xfunder"}]});if(command.indexOf("newscript")===0)return cb({status:true});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xcombo"}});cb({status:true});}
 PandaTxn.fillComposite(comboCmd,{address:"0xme"},combo,true,function(err,tx){builtOutcome={err:err,tx:tx};});
 var comboCreate=builtCalls.filter(function(c){return c.indexOf("txncreate id:combo_")===0;})[0], comboId=comboCreate.split("id:")[1];
 assert.deepStrictEqual(builtOutcome,{err:null,tx:"0xcombo"});assert(builtCalls.some(function(c){return c==="txninput id:"+comboId+" coinid:0xpm";}));assert(builtCalls.some(function(c){return c.indexOf("address:0xpool")>0&&c.indexOf("tokenid:"+PandaDEX.USDT)>0;}));
@@ -174,7 +174,7 @@ assert.strictEqual(layoutInputs[layoutInputs.length-1],"txninput id:tx coinid:0x
 /* Regression: Minima's txncheck says `validamounts`, never `amounts`. A valid owner-cancel
    must post, and must sign specifically with the owner key embedded in port 0. */
 var calls=[], outcome=null;
-function fakeCmd(command, cb){calls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xposted"}});cb({status:true});}
+function fakeCmd(command, cb){calls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xposted"}});cb({status:true});}
 PandaTxn.cancel(fakeCmd,sell,function(err,tx){outcome={err:err,tx:tx};});
 assert.deepStrictEqual(outcome,{err:null,tx:"0xposted"});assert(calls.some(function(c){return c.indexOf("txnsign")===0&&c.indexOf("publickey:0xabc")>0;}));
 calls=[];outcome=null;PandaTxn.relock(fakeCmd,sell,"30",function(err,tx){outcome={err:err,tx:tx};});
@@ -208,13 +208,13 @@ assert.strictEqual(gateMaxOpen,1);                                        /* nev
 assert.strictEqual(PandaSignLock.busy(),false);assert.strictEqual(PandaSignLock.queued(),0);
 var gateRuns=0;PandaSignLock.gate("d",function(release){gateRuns++;release.free();});
 assert.strictEqual(gateRuns,1);                                           /* empty queue runs immediately, once */
-/* A chain that throws must free the gate AND surface the error. Swallowing it is exactly how three
-   separate signing outages stayed invisible; the service wraps actions and reports instead. */
+/* A throwing operation can have dispatched a node write. Preserve its gate until resolved. */
 var gateThrew=false;
 try { PandaSignLock.gate("boom",function(){throw new Error("chain blew up");}); }
 catch (error) { gateThrew=true; }
 assert(gateThrew,"a throwing chain must not be swallowed by the gate");
-assert.strictEqual(PandaSignLock.busy(),false,"a throwing chain left the gate held");
+assert.strictEqual(PandaSignLock.busy(),true,"a local exception must not release an uncertain signing operation");
+PandaSignLock.reset(); /* test-only isolated context; never a runtime recovery shortcut */
 var gateAfter=false;PandaSignLock.gate("after",function(release){gateAfter=true;release.free();});
 assert(gateAfter,"the queue did not continue after a throwing chain");
 /* There is no durable layer any more, and that is the point: it guarded against a second signing
@@ -237,7 +237,7 @@ assert(calls.some(function(c){return c.indexOf("send ")===0&&c.indexOf("address:
 calls=[];outcome=null;
 function sizedCmd(bytes){return function(command,cb){calls.push(command);
   if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x"+"ab".repeat(bytes)}});
-  if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}});
+  if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}});
   if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xposted"}});
   cb({status:true});};}
 PandaTxn.cancel(sizedCmd(10),sell,function(err,tx){outcome={err:err,tx:tx};});
@@ -510,7 +510,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   };
   vmmod.createContext(sandbox);
   /* Exactly the list service.js loads, in the same order. */
-  ["decimal.js","covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
+  ["safety.js","decimal.js","covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
    "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js"].forEach(function (f) {
     try { vmmod.runInContext(fsmod.readFileSync(f, "utf8"), sandbox, { filename: f }); }
     catch (error) { throw new Error(f + " cannot load in the MDS service scope: " + error); }
@@ -550,7 +550,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   /* And no service module may reference a browser global at all. */
   /* A host method must be CALLED on its owner, never passed or stored. Detaching one is invisible
      under Node and fatal on the node. */
-  ["signlock.js","price.js","txn.js","service.js","tape.js","pool.js","composite.js","book.js",
+  ["safety.js","signlock.js","price.js","txn.js","service.js","tape.js","pool.js","composite.js","book.js",
    "covenant.js","maker.js","verifier.js","pending.js","stats.js","split.js","history.js"].forEach(function (f) {
     var src = fsmod.readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
     /* `if (MDS.notify)` and `typeof MDS.log` are existence checks, not detachments — strip them
@@ -559,7 +559,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
     var detached = src.match(/[(,=]\s*MDS\.[a-z]+(\.[A-Za-z]+)?\s*[,);]/g);
     assert(!detached, f + " passes a host method by reference (" + detached + ") — call it on its owner instead");
   });
-  ["signlock.js","price.js","txn.js","service.js","tape.js","pool.js","composite.js","book.js",
+  ["safety.js","signlock.js","price.js","txn.js","service.js","tape.js","pool.js","composite.js","book.js",
    "covenant.js","maker.js","verifier.js","pending.js","stats.js","split.js"].forEach(function (f) {
     /* Strip comments first — this file's own header names the globals it must not use. */
     var src = fsmod.readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
@@ -608,14 +608,14 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
         else if (c.indexOf("coins") === 0) r = { status:true, response:coinsFor(c) };
         else if (c.indexOf("random") === 0) r = { status:true, response:{ random:"0xnewid" } };
         else if (c.indexOf("txnexport") === 0) r = { status:true, response:{ data:"0x00" } };
-        else if (c.indexOf("txncheck") === 0) r = { status:true, response:{ valid:{ scripts:true, basic:true, mmrproofs:true, validamounts:true }, allsignaturesvalid:true } };
+        else if (c.indexOf("txncheck") === 0) r = { status:true, response:{ valid:{ scripts:true, basic:true, mmrproofs:true }, validamounts:true, validtransaction:true, allsignaturesvalid:true } };
         else if (c.indexOf("txnpost") === 0) r = { pending:true, response:{ txpowid:"0xposted" } };
         if (cb) cb(r);
       }
     }
   };
   vmmod.createContext(sandbox);
-  ["decimal.js","covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
+  ["safety.js","decimal.js","covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
    "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js"].forEach(function (f) {
     vmmod.runInContext(fsmod.readFileSync(f, "utf8"), sandbox, { filename:f });
   });
@@ -671,7 +671,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
         else if(c.indexOf("block")===0) r={status:true,response:{block:1000}};
         else if(c.indexOf("random")===0) r={status:true,response:{random:"0xnewid"}};
         else if(c.indexOf("txnexport")===0) r={status:true,response:{data:"0x00"}};
-        else if(c.indexOf("txncheck")===0) r={status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true,validamounts:true},allsignaturesvalid:true}};
+        else if(c.indexOf("txncheck")===0) r={status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}};
         else if(c.indexOf("txnpost")===0) r={pending:true,response:{txpowid:"0xcomposite"}};
         else if(c.indexOf("coins")===0){
           var rows=[];
@@ -690,7 +690,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
     }
   };
   vmmod.createContext(sandbox);
-  ["decimal.js","covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
+  ["safety.js","decimal.js","covenant.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
    "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js"].forEach(function(f){
     vmmod.runInContext(fsmod.readFileSync(f,"utf8"), sandbox, {filename:f});
   });
@@ -1030,5 +1030,31 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   scope.depthCache.key="current";scope.depthCache.requestedKey="current";scope.renderBookOnly();
   assert.strictEqual(node("spread").textContent,"0.004400","best displayed level combines book and pool sizes once");
   scope.depthCache.requestedKey="next";scope.renderBookOnly();assert.strictEqual(node("spread").textContent,"—","stale pool depth cannot produce a current weighted price");
+})();
+/* Native TransactionHardeningTest: missing or malformed verdicts cannot authorize posting. */
+(function(){
+  function checked(){return {status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,allsignaturesvalid:true,validtransaction:true}};}
+  assert.strictEqual(PandaSafety.checkFailure(checked()),null);
+  ["status","scripts","basic","mmrproofs","validamounts","allsignaturesvalid","validtransaction"].forEach(function(key){
+    [null,false,0,1.5,"garbage",{},[],undefined].forEach(function(value){
+      var r=checked(), target=key==="status"?r:(["scripts","basic","mmrproofs"].indexOf(key)>=0?r.response.valid:r.response);
+      target[key]=value;assert(PandaSafety.checkFailure(r),key+"="+value);
+      var sent=[], error;
+      PandaTxn.cancel(function(command,cb){sent.push(command); if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("txncheck")===0)return cb(r);cb({status:true});},sell,function(e){error=e;});
+      assert(error);assert(!sent.some(function(c){return c.indexOf("txnpost")===0;}));
+    });
+  });
+  ["txnstate id:x port:4 value:0xaa;send amount:1",'runscript script:"RETURN TRUE;sign data:0xaa"',"keys\n", "keys\u0000"].forEach(function(c){assert(PandaSafety.commandFailure(c));});
+  assert.strictEqual(PandaSafety.commandFailure("consolidate tokenid:0x00"),null);
+  assert(PandaSafety.postError({error:"TxPoW size too large.. 70000/65536"}).indexOf("70000/65536")>=0);
+  assert.strictEqual(PandaSafety.tipBlock({status:true,response:{block:123}}),123);
+  assert.strictEqual(PandaSafety.tipBlock({status:true,response:{block:"123"}}),123);
+  [0,-1,1.5,"1e3",true,"9007199254740992"].forEach(function(v){assert.strictEqual(PandaSafety.tipBlock({status:true,response:{block:v}}),0);});
+  assert.strictEqual(PandaSafety.tipBlock({status:false,response:{block:123}}),0);
+  var sent=[], error; PandaTxn.run(function(c,cb){sent.push(c);cb({status:true});},["txncreate id:x","txnstate id:x port:4 value:0xaa;send amount:1"],"x",function(e){error=e;});assert(error);assert.strictEqual(sent.length,0);
+  var original=Date.now, next=false, release;
+  PandaSignLock.reset();PandaSignLock.gate("held",function(r){release=r;});PandaSignLock.gate("next",function(r){next=true;r.free();});
+  try {Date.now=function(){return original()+24*3600000;};PandaSignLock.tick();assert(!next);assert(PandaSignLock.busy());}finally{Date.now=original;}
+  release.free();assert(next);assert(!PandaSignLock.busy());
 })();
 console.log("PandaDEX pure tests passed");

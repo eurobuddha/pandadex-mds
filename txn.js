@@ -1,6 +1,19 @@
 var PandaTxn = PandaTxn || {};
 (function (T, P) {
-  T.run = function (cmd, steps, fail, done, n) { n=n||0; if(n>=steps.length)return done(null); cmd(steps[n],function(r){if(!r||!r.status){if(fail)cmd("txndelete id:"+fail,function(){});return done((r&&r.error)||("Failed: "+steps[n]));}T.run(cmd,steps,fail,done,n+1);}); };
+  T.run = function(cmd, steps, fail, done, n) {
+    var i, invalid, called=false; n=n||0;
+    if (n===0) for(i=0;i<steps.length;i++) { invalid=PandaSafety.commandFailure(steps[i]); if(invalid)return done(invalid); }
+    if(n>=steps.length)return done(null);
+    T.stage(steps[n].indexOf("txnsign ")===0 ? "Signing transaction" : "Building transaction");
+    cmd(steps[n],function(r){
+      if(called)return;called=true;
+      if(!r || !PandaSafety.truthy(r.status) || PandaSafety.truthy(r.pending)) {
+        if(fail)cmd("txndelete id:"+fail,function(){});
+        return done(PandaSafety.truthy(r&&r.pending)?"Command queued for approval; it has not completed. Check Pending in MiniHub before retrying.":(r&&r.error)||("Failed: "+steps[n]));
+      }
+      T.run(cmd,steps,fail,done,n+1);
+    });
+  };
   T.id = function (prefix) { return prefix+"_"+Date.now()+"_"+Math.floor(Math.random()*1000000000); };
   /* Narration hook. The service points this at PDService.setStage so a trade reports what it is
      actually doing instead of showing one frozen line for minutes. No-op by default. */
@@ -35,12 +48,13 @@ var PandaTxn = PandaTxn || {};
   T.checkPost = function (cmd,id,steps,done,signKey) {
     var keys = signKey ? (Array.isArray(signKey)?signKey:[signKey]) : ["auto"], missing;
     missing = T.ownerKeyMissing(keys);
-    if (missing) return done("This wallet does not hold the key that owns that order (" + missing.substring(0, 12) + "…). Nothing was sent.");
+    if (missing) return done("This wallet does not hold the key that owns that order (" + missing + "). Nothing was sent.");
     T.stage("Waiting for the signing lock…");
     PandaSignLock.gate("dex", function (release) {
       /* Release exactly once, on every exit path — success, validation failure, post rejection
          and build error alike. Holding it past the chain would stall the maker for MAX_HOLD_MS. */
-      function finish(err, tx) { release.free(); done(err, tx); }
+      var finished=false;
+      function finish(err, tx) { if(finished)return;finished=true;try { done(err,tx); } finally { release.free(); } }
       var k;
       for (k = 0; k < keys.length; k++) steps.push("txnsign id:"+id+" publickey:"+keys[k]);
       steps.push("txnbasics id:"+id);
@@ -58,34 +72,24 @@ var PandaTxn = PandaTxn || {};
            pairs plus order coins plus funding — are the shape that overflows. */
         cmd("txnexport id:"+id,function(exp){
           var resp=exp&&exp.response, data=(resp&&typeof resp.data==="string")?resp.data:null, hex, bytes;
-          if(!exp||!exp.status||data===null){
+          if(!exp||!PandaSafety.truthy(exp.status)||PandaSafety.truthy(exp.pending)||data===null){
             cmd("txndelete id:"+id,function(){});
             return finish((exp&&exp.error)||"Could not size the transaction before sending it");
           }
           hex=(data.indexOf("0x")===0||data.indexOf("0X")===0)?data.substring(2):data;
-          bytes=Math.floor(hex.length/2);
+          if(!/^(?:[0-9a-fA-F]{2})+$/.test(hex)) {
+            cmd("txndelete id:"+id,function(){}); return finish("Could not read valid transaction bytes. Nothing was posted.");
+          }
+          bytes=hex.length/2;
           if(bytes>T.MAX_TX_BYTES){
             cmd("txndelete id:"+id,function(){});
             return finish("Transaction is too large ("+Math.round(bytes/1024)+"KB) — reduce the number of orders or consolidate your wallet coins");
           }
         cmd("txncheck id:"+id,function(check){
-          /* Mirror Android's proven gate. `validamounts` is the Minima verdict field;
-             older node responses carry it beside `valid`, not inside it. */
-          var response=check&&check.response, valid=response&&response.valid,
-            scripts=!!(valid&&valid.scripts), basic=!!(valid&&valid.basic), mmr=!!(valid&&valid.mmrproofs),
-            amounts=true, sigs=!response||response.allsignaturesvalid!==false;
-          if(valid&&valid.validamounts!==undefined) amounts=!!valid.validamounts;
-          else if(response&&response.validamounts!==undefined) amounts=!!response.validamounts;
-          if(!check||!check.status||!scripts||!basic||!amounts||!mmr||!sigs){
-            cmd("txndelete id:"+id,function(){});
-            return finish("Transaction rejected: " + (!mmr ? "an input coin was already spent — the pool or an order moved before this was sent; nothing was posted, try again"
-              : !scripts ? "a covenant refused this transaction (scripts=false) — nothing was posted"
-              : !amounts ? "the amounts do not balance — nothing was posted"
-              : !sigs ? "a signature was not valid — nothing was posted"
-              : "validation failed") + " [scripts="+scripts+" basic="+basic+" amounts="+amounts+" mmr="+mmr+" sigs="+sigs+(check&&check.error?" node="+check.error:"")+"]");
-          }
+          var failure=PandaSafety.checkFailure(check);
+          if(failure) { cmd("txndelete id:"+id,function(){}); return finish(failure); }
           T.stage("Posting to the network…");
-          cmd("txnpost id:"+id,function(post){if(!post||(!post.status&&!post.pending)){cmd("txndelete id:"+id,function(){});return finish((post&&post.error)||"Transaction was not accepted");}cmd("txndelete id:"+id,function(){});finish(null,post.response&&post.response.txpowid||id);});
+          cmd("txnpost id:"+id,function(post){if(!post||(!post.status&&!post.pending)){cmd("txndelete id:"+id,function(){});return finish(PandaSafety.postError(post));}cmd("txndelete id:"+id,function(){});finish(null,post.response&&post.response.txpowid||id);});
         });
         });
       });

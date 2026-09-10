@@ -32,14 +32,12 @@
  * path with it. It was inherited from pandapools-mds, which genuinely needs it because its page
  * does sign. Copying it here was the mistake.
  *
- * What remains is the part that earns its place: one queue, and a watchdog for a chain whose
- * callback the node never delivers.
+ * What remains is the part that earns its place: one queue held until the owning operation completes. A timeout is not completion.
  */
 var PandaSignLock = PandaSignLock || {};
 (function (L) {
 
-  /* Longer than the node's write timeout, so this only fires for a genuinely lost callback and
-     never for a chain that is merely slow — proof-of-work on a phone is not quick. */
+  /* Compatibility constant only. Elapsed time never releases an active signing operation. */
   L.MAX_HOLD_MS = 200 * 1000;
 
   var QUEUE = [], ACTIVE = null, TOKEN = 0;
@@ -70,8 +68,9 @@ var PandaSignLock = PandaSignLock || {};
     TOKEN++;
     ACTIVE = { token: TOKEN, startedAt: now() };
     rel = makeRelease(TOKEN);
-    /* A throw inside the chain must not strand the gate until MAX_HOLD_MS. */
-    try { job.work(rel); } catch (error) { rel.free(); throw error; }
+    /* A throw can occur after a node write was dispatched. Only the owner knows whether
+       completion is established; elapsed time or a local exception cannot release it. */
+    job.work(rel);
   }
 
   /* Idempotent, and identified by token so a LATE release cannot free somebody else's lock. An
@@ -92,7 +91,7 @@ var PandaSignLock = PandaSignLock || {};
   /* Called by the service on every NEWBLOCK. The only clock this file has. */
   L.tick = function () {
     if (!ACTIVE) { pump(); return; }
-    if (now() - ACTIVE.startedAt > L.MAX_HOLD_MS) { ACTIVE = null; pump(); }
+    /* The active operation remains held until its own completion, as in native SerialQueue. */
   };
 
 })(PandaSignLock);

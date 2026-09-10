@@ -24,3 +24,9 @@ Reuse: existing MDS decimal.js, depth grouping, service messages and Node VM tes
 `node test.js` passed, including native weighted-price vectors and actual MDS page/service functions under the repository's Node VM harness. Added checks cover immediate feedback with the service callback held, live updates in the same dialog, a 60-message cap, repeated snapshots, safe text rendering, in-flight stage lifetime, mixed pool/book depth and unknown price for stale pool depth. `git diff --check` passed.
 
 Review: no contract, funding, maker or receipt semantics changed in this checkpoint. Browser keyboard and responsive rendering still require actual runtime validation; the Node DOM fixture does not establish those. Full parity remains incomplete as listed above.
+
+## 0.4.8 validation
+
+Ported `TxValidation`, `CommandSafety` and completion-owned signing serialization from native. Transaction checks require every stock verdict in its real location. All construction steps are checked for command separators/control characters before the first step; service commands reject them independently. An elapsed timeout or local exception cannot start another signing operation. Failed/malformed block replies cannot drive maintenance using a fabricated tip. Recovery of an unknown write and durable receipts remain outstanding.
+
+`node test.js` passed with the actual stock `txncheck` reply schema, every mandatory verdict missing or malformed, invalid command data, an elapsed signing timeout, and numeric/string block heights. The module is included in the shipping list and service VM checks. The native source tests reused are `TransactionHardeningTest` and `SerialQueueTest`. Existing integration fixtures still accept pending post replies; pending approval/submission identity will be addressed with durable receipts, not claimed fixed here.
