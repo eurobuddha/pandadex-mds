@@ -44,3 +44,13 @@ Removed the obsolete `txnexport` size gate to match current APK `DexTxn.checkAnd
 Ported native `MainActivity.balanceMeta` and `AssetsTab` behavior. Both tokens are queried separately; failed, wrong-token, ambiguous or malformed replies remain unknown. Valid empty non-native token responses are observed zero. Existing observations and timestamps survive failed refreshes. Missing sendable no longer falls back to confirmed, and an unloaded card/total renders unknown.
 
 `node test.js` passed with native balance vectors and the actual page callbacks exercised under the VM harness: scoped queries, retained observations after failure and wrong-token rejection. Existing NEWBLOCK/NEWBALANCE refresh checks remain. No contract timing changes.
+
+## 0.4.11 validation
+
+Ported native `DexDb` additive migration behavior: older saved market and personal rows are preserved, and personal trades are no longer deleted by a rolling 8,000-row cap. A failed schema setup stops service initialization before trading becomes ready. Schema-marker replacement uses the existing PandaPools H2 `MERGE ... KEY` pattern.
+
+`node test.js` passed. `test-rhino.js` passed 24 assertions using the actual Minima `rhino-1.7.14.jar` and `h2-2.4.240.jar`: upgrade a seeded legacy schema, preserve both historical rows, read migrated evidence columns, repeat initialization, and exercise atomic replacement. This test is offline and uses an in-memory database; it sends no node commands.
+
+## Live validation authorization
+
+The user explicitly authorized small real-money trades on the S10 Plus on 2026-09-11. The working validation limit is 1 MINIMA equivalent per test leg, with a live quote check and on-chain verification before the next leg. This authorizes bounded live validation after the candidate passes offline checks; it does not authorize changing seeds, wiping data or spending larger existing maker allocations. Full parity is still in progress.

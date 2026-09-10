@@ -95,39 +95,30 @@ var PandaTape = PandaTape || {};
     state.prev = next;
     state.prevAtMs = now;
   };
-  T.init = function (done) {
-    MDS.sql("CREATE TABLE IF NOT EXISTS `market_tape` (`spentcoin` varchar(160) PRIMARY KEY, `timems` bigint, `block` bigint, `price` varchar(80), `size` varchar(80), `buy` int, `partial` int, `mine` int)", function () {
-      /* Every tape, candle and 24h-stats read orders by timems over up to 8000 rows. */
-      MDS.sql("CREATE INDEX IF NOT EXISTS `tape_time` ON `market_tape`(`timems`)", function () {
-      MDS.sql("CREATE TABLE IF NOT EXISTS `my_trades` (`spentcoin` varchar(160) PRIMARY KEY, `timems` bigint, `block` bigint, `price` varchar(80), `size` varchar(80), `buy` int, `maker` int, `orderid` varchar(160))", function () {
-        T.migrateEvidence(function () { T.ensureSchema(done); });
-      });
-      });
-    });
+  T.init = function(done) {
+    var statements=[
+      "CREATE TABLE IF NOT EXISTS `market_tape` (`spentcoin` varchar(160) PRIMARY KEY, `timems` bigint, `block` bigint, `price` varchar(80), `size` varchar(80), `buy` int, `partial` int, `mine` int)",
+      "CREATE INDEX IF NOT EXISTS `tape_time` ON `market_tape`(`timems`)",
+      "CREATE TABLE IF NOT EXISTS `my_trades` (`spentcoin` varchar(160) PRIMARY KEY, `timems` bigint, `block` bigint, `price` varchar(80), `size` varchar(80), `buy` int, `maker` int, `orderid` varchar(160))"
+    ];
+    function next(i) {
+      if(i===statements.length)return T.migrateEvidence(function(ok){if(!ok)return done(false);T.ensureSchema(done);});
+      MDS.sql(statements[i],function(r){if(!r||r.status!==true)return done(false);next(i+1);});
+    }
+    next(0);
   };
-  /* Evidence columns, added after the table shipped. Probe first and only ALTER when the column
-     is genuinely absent: a bare ALTER on every launch is noise at best, and on a restricted node
-     each unnecessary statement is another approval prompt. Each column is independent, so a
-     failure on one does not abandon the rest. */
-  /* One-time purge. Every release up to 0.3.4 recorded an unverifiable disappearance as a fill, and
-     0.3.5 fixed the source but could not undo what was already written — those rows are still in the
-     database, still feeding the tape, the candles, the 24h stats, the P&L and the export. There was
-     no schema version at all, so there was no way to express "this data is wrong, drop it". Native
-     hit the identical problem and solved it the identical way (DexDb v<3). The data is locally
-     derived and rebuilds itself from the chain. */
-  T.SCHEMA_VERSION = 2;
-  T.ensureSchema = function (done) {
-    MDS.sql("CREATE TABLE IF NOT EXISTS `dex_schema` (`k` varchar(32) primary key, `v` int)", function () {
-      MDS.sql("SELECT `v` FROM `dex_schema` WHERE `k`='tape'", function (res) {
-        var rows = (res && res.rows) || [], have = rows.length ? Number(rows[0].V || rows[0].v || 0) : 0;
-        if (have >= T.SCHEMA_VERSION) { if (done) done(); return; }
-        MDS.sql("DELETE FROM `market_tape`", function () {
-          MDS.sql("DELETE FROM `my_trades`", function () {
-            MDS.sql("DELETE FROM `dex_schema` WHERE `k`='tape'", function () {
-              MDS.sql("INSERT INTO `dex_schema` (`k`,`v`) VALUES ('tape'," + T.SCHEMA_VERSION + ")", function () { if (done) done(); });
-            });
-          });
-        });
+  /* Native DexDb additive migrations: saved history belongs to the user. Never purge it to
+     resolve uncertain observations. Verification metadata will describe that uncertainty. */
+  T.SCHEMA_VERSION = 3;
+  T.ensureSchema = function(done) {
+    MDS.sql("CREATE TABLE IF NOT EXISTS `dex_schema` (`k` varchar(32) primary key, `v` int)",function(created){
+      if(!created||created.status!==true)return done(false);
+      MDS.sql("SELECT `v` FROM `dex_schema` WHERE `k`='tape'",function(res){
+        if(!res||res.status!==true||!Array.isArray(res.rows))return done(false);
+        var rows=res.rows,have=rows.length?Number(rows[0].V===undefined?rows[0].v:rows[0].V):0;
+        if(!isFinite(have)||have<0||Math.floor(have)!==have)return done(false);
+        if(have>=T.SCHEMA_VERSION)return done(true);
+        MDS.sql("MERGE INTO `dex_schema` (`k`,`v`) KEY(`k`) VALUES ('tape',"+T.SCHEMA_VERSION+")",function(r){done(!!r&&r.status===true);});
       });
     });
   };
@@ -138,11 +129,11 @@ var PandaTape = PandaTape || {};
   ];
   T.migrateEvidence = function (done, idx) {
     var i = idx || 0, col;
-    if (i >= T.EVIDENCE_COLUMNS.length) { if (done) done(); return; }
+    if (i >= T.EVIDENCE_COLUMNS.length) { if (done) done(true); return; }
     col = T.EVIDENCE_COLUMNS[i];
     MDS.sql("SELECT `" + col[0] + "` FROM `my_trades` LIMIT 1", function (probe) {
       if (probe && probe.status) return T.migrateEvidence(done, i + 1);
-      MDS.sql("ALTER TABLE `my_trades` ADD COLUMN `" + col[0] + "` " + col[1], function () { T.migrateEvidence(done, i + 1); });
+      MDS.sql("ALTER TABLE `my_trades` ADD COLUMN `" + col[0] + "` " + col[1], function (r) { if(!r||r.status!==true)return done(false);T.migrateEvidence(done, i + 1); });
     });
   };
   T.insertOnce = function (table, row, done) {
@@ -152,7 +143,7 @@ var PandaTape = PandaTape || {};
         T.esc(row.spentcoin) + "'," + Number(row.timems || Date.now()) + "," + Number(row.block || 0) + ",'" +
         T.esc(P.plain(row.price)) + "','" + T.esc(P.plain(row.size)) + "'," + (row.buy ? 1 : 0) + "," +
         (table === "market_tape" ? ((row.partial ? 1 : 0) + "," + (row.mine ? 1 : 0)) : ((row.maker ? 1 : 0) + ",'" + T.esc(row.orderid || "") + "'")) + ")", function (res) {
-          MDS.sql("DELETE FROM `" + table + "` WHERE `spentcoin` NOT IN (SELECT `spentcoin` FROM `" + table + "` ORDER BY `timems` DESC LIMIT 8000)", function () {});
+          if(table==="market_tape")MDS.sql("DELETE FROM `market_tape` WHERE `spentcoin` NOT IN (SELECT `spentcoin` FROM `market_tape` ORDER BY `timems` DESC LIMIT 8000)", function () {});
           if (done) done(!!(res && res.status));
         });
     });
@@ -171,7 +162,6 @@ var PandaTape = PandaTape || {};
         T.esc(row.sourceKind || "") + "','" + T.esc(row.sourceCoinids || "") + "','" +
         T.esc(row.verificationStatus || "LOCAL_VERIFIED") + "','" + T.esc(row.verificationNote || "") + "'," +
         Number(row.verifiedBlock || row.block || 0) + ")", function (res) {
-          MDS.sql("DELETE FROM `my_trades` WHERE `spentcoin` NOT IN (SELECT `spentcoin` FROM `my_trades` ORDER BY `timems` DESC LIMIT 8000)", function () {});
           if (done) done(!!(res && res.status));
         });
     });

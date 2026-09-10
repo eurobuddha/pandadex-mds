@@ -896,7 +896,8 @@ PDService.boot = function() {
         if (!addressResult.status) return PDService.tell("ERROR", {message:addressResult.error || "Could not read wallet identity"});
         PDService.identity = {address:addressResult.response.address, publickey:addressResult.response.publickey, miniaddress:addressResult.response.miniaddress};
         PDService.loadKeys(function() {
-        PandaTape.init(function() {
+        PandaTape.init(function(ok) {
+    if(ok===false){PDService.tell("ERROR",{message:"Trade history storage could not be opened. Existing data is retained; retry when storage is available."});return;}
           /* Load the persisted cancel log alongside boot — it only has to be present before the
              first fill adjudication, which is a refresh away. No extra nesting. */
           PDService.cancelInit(function() {});

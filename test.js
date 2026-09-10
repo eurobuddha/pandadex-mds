@@ -1100,4 +1100,19 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   var zero=PandaBalance.meta({status:true,response:[]},1000,PandaDEX.USDT);assert.strictEqual(zero.at,1000);assert(zero.sendable.eq(0));
   assert.strictEqual(PandaBalance.meta({status:false,response:[]},1000,PandaDEX.USDT).at,0);
 })();
+/* Native DexDb's additive migration rule, including a failed schema read. */
+(function(){
+  var oldMds=global.MDS,sql=[],completed=null;
+  try {
+    global.MDS={sql:function(q,cb){sql.push(q);cb({status:true,rows:[]});}};
+    PandaTape.ensureSchema(function(ok){completed=ok;});assert.strictEqual(completed,true);
+    assert(!sql.some(function(q){return /DELETE|DROP|TRUNCATE/i.test(q);}),"migration must preserve every old history row");
+    assert(sql.some(function(q){return q.indexOf("MERGE INTO `dex_schema`")===0;}));
+    sql=[];completed=null;global.MDS.sql=function(q,cb){sql.push(q);cb(q.indexOf("SELECT")===0?{status:false}:{status:true,rows:[]});};
+    PandaTape.ensureSchema(function(ok){completed=ok;});assert.strictEqual(completed,false);assert(!sql.some(function(q){return q.indexOf("MERGE")===0;}));
+    sql=[];global.MDS.sql=function(q,cb){sql.push(q);cb({status:true,rows:[]});};
+    PandaTape.addMyTrade({spentcoin:"0x9901",timems:100,block:10,price:PandaDEX.d(1),size:PandaDEX.d(1)},function(){});
+    assert(!sql.some(function(q){return q.indexOf("DELETE FROM `my_trades`")===0;}),"personal history is not a rolling cache");
+  } finally {global.MDS=oldMds;}
+})();
 console.log("PandaDEX pure tests passed");
