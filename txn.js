@@ -4,7 +4,7 @@ var PandaTxn = PandaTxn || {};
     var i, invalid, called=false; n=n||0;
     if (n===0) for(i=0;i<steps.length;i++) { invalid=PandaSafety.commandFailure(steps[i]); if(invalid)return done(invalid); }
     if(n>=steps.length)return done(null);
-    T.stage(steps[n].indexOf("txnsign ")===0 ? "Signing transaction" : "Building transaction");
+    T.progress(steps[n].indexOf("txnsign ")===0 ? "Signing transaction" : "Building transaction");
     cmd(steps[n],function(r){
       if(called)return;called=true;
       if(!r || !PandaSafety.truthy(r.status) || PandaSafety.truthy(r.pending)) {
@@ -18,7 +18,7 @@ var PandaTxn = PandaTxn || {};
   /* Narration hook. The service points this at PDService.setStage so a trade reports what it is
      actually doing instead of showing one frozen line for minutes. No-op by default. */
   T.stage = function () {};
-  T.MAX_TX_BYTES = 60 * 1024;   /* native DexTxn: 60 * 1024 */
+  T.progress = function(message) { try { T.stage(message); } catch(ignore) {} };
   T.MAX_FUNDING_INPUTS = 8;
   /* Limit/service.js checks the sign error for LOCK and says what to do about it. A locked vault
      fails EVERY signature, and on a node left locked that is an ordinary state — reporting the raw
@@ -49,48 +49,33 @@ var PandaTxn = PandaTxn || {};
     var keys = signKey ? (Array.isArray(signKey)?signKey:[signKey]) : ["auto"], missing;
     missing = T.ownerKeyMissing(keys);
     if (missing) return done("This wallet does not hold the key that owns that order (" + missing + "). Nothing was sent.");
-    T.stage("Waiting for the signing lock…");
+    var inputIds=[],i,match,invalid;
+    for(i=0;i<steps.length;i++) {
+      invalid=PandaSafety.commandFailure(steps[i]);if(invalid)return done(invalid);
+      if(steps[i].indexOf("txninput ")===0){match=/(?:^|\s)coinid:(\S+)/.exec(steps[i]);if(!match||!PandaSafety.hex(match[1]))return done("Invalid transaction input. Nothing was signed.");inputIds.push(match[1]);}
+    }
+    if(!inputIds.length||inputIds.length>PandaFunding.MAX_INPUTS)return done("Too many transaction inputs. Consolidate funding or use fewer orders/pools.");
+    if(!PandaCoinLock.claimInputs(inputIds))return done("An input is already in another queued transaction or appears twice. Wait and refresh.");
+    T.progress("Waiting for the signing lock…");
     PandaSignLock.gate("dex", function (release) {
       /* Release exactly once, on every exit path — success, validation failure, post rejection
-         and build error alike. Holding it past the chain would stall the maker for MAX_HOLD_MS. */
+         and build error alike. Only the operation callback releases the signing slot. */
       var finished=false;
-      function finish(err, tx) { if(finished)return;finished=true;try { done(err,tx); } finally { release.free(); } }
+      function finish(err, tx) { if(finished)return;finished=true;PandaCoinLock.finishInputs(inputIds);try { done(err,tx); } finally { release.free(); } }
       var k;
       for (k = 0; k < keys.length; k++) steps.push("txnsign id:"+id+" publickey:"+keys[k]);
       steps.push("txnbasics id:"+id);
       /* txncheck is the only command whose response is the validation verdict. Do not infer
        * validity from txnlist or txnpost: the latter merely means mempool acceptance. */
-      T.stage("Signing " + steps.length + " step" + (steps.length===1?"":"s") + "…");
+      T.progress("Signing " + steps.length + " step" + (steps.length===1?"":"s") + "…");
       T.run(cmd,steps,id,function(err){ if(err)return finish(T.signError(err) || err);
-        T.stage("Checking the transaction before it is sent…");
-        /* Size gate before the validation gate — a direct port of native DexTxn.postGated
-           (DexTxn.java:552-566), because native is the parity reference and native does this.
-           I removed it in 0.4.2 on the grounds that Limit and pandapools do not, which was the
-           wrong reference to reason from. Native's shape exactly: read response.data, strip 0x,
-           two hex chars per byte; over 60KB is a hard fail with the actionable message, and an
-           unreadable reply is ALSO a hard fail rather than a silent pass. Composite fills — pool
-           pairs plus order coins plus funding — are the shape that overflows. */
-        cmd("txnexport id:"+id,function(exp){
-          var resp=exp&&exp.response, data=(resp&&typeof resp.data==="string")?resp.data:null, hex, bytes;
-          if(!exp||!PandaSafety.truthy(exp.status)||PandaSafety.truthy(exp.pending)||data===null){
-            cmd("txndelete id:"+id,function(){});
-            return finish((exp&&exp.error)||"Could not size the transaction before sending it");
-          }
-          hex=(data.indexOf("0x")===0||data.indexOf("0X")===0)?data.substring(2):data;
-          if(!/^(?:[0-9a-fA-F]{2})+$/.test(hex)) {
-            cmd("txndelete id:"+id,function(){}); return finish("Could not read valid transaction bytes. Nothing was posted.");
-          }
-          bytes=hex.length/2;
-          if(bytes>T.MAX_TX_BYTES){
-            cmd("txndelete id:"+id,function(){});
-            return finish("Transaction is too large ("+Math.round(bytes/1024)+"KB) — reduce the number of orders or consolidate your wallet coins");
-          }
+        T.progress("Checking the transaction before it is sent…");
+        /* txnexport is not serialized TxPoW. The stock node enforces its actual limit at txnpost. */
         cmd("txncheck id:"+id,function(check){
           var failure=PandaSafety.checkFailure(check);
           if(failure) { cmd("txndelete id:"+id,function(){}); return finish(failure); }
-          T.stage("Posting to the network…");
+          T.progress("Posting to the network…");
           cmd("txnpost id:"+id,function(post){if(!post||(!post.status&&!post.pending)){cmd("txndelete id:"+id,function(){});return finish(PandaSafety.postError(post));}cmd("txndelete id:"+id,function(){});finish(null,post.response&&post.response.txpowid||id);});
-        });
         });
       });
     }, function (blocked) { done(blocked); });
@@ -108,13 +93,13 @@ var PandaTxn = PandaTxn || {};
   /* A funding coin carrying state brings its own script into our transaction. Native drops these
      and we did not — one of the few remaining differences in the coin selector. */
   T.hasState = function(c){var st=c&&c.state;if(!st)return false;if(Array.isArray(st))return st.length>0;return typeof st==="object"?Object.keys(st).length>0:!!st;};
-  T.coinValue = function(c){return P.d(P.eqTok(c.tokenid,"0x00")?c.amount:(c.tokenamount||c.amount));};
+  T.coinValue = function(c){return PandaFunding.value(c);};
   /* `sendable:true checkmempool:true` is what `send` itself uses — without it we can pick a coin
      already spent by an unconfirmed transaction. Filtering by tokenid server-side also keeps the
      reply small, which matters because an over-cap MDS reply comes back empty rather than erroring
      and would read here as "insufficient funds". */
-  T.coinQuery = function(tok){return "coins relevant:true sendable:true checkmempool:true simplestate:true tokenid:"+tok;};
-  T.findCoins = function(cmd,payTok,needed,exclude,maxCoins,done){cmd(T.coinQuery(payTok),function(res){var cs=res&&res.response,chosen=[],sum=P.d(0),i,c,val,addr;if(!res||!res.status||!Array.isArray(cs))return done("Could not read funding coins");exclude=exclude||{};for(i=0;i<cs.length&&sum.lt(needed)&&chosen.length<(maxCoins||8);i++){c=cs[i];addr=String(c.address||"").toLowerCase();if(c.spent||!P.eqTok(c.tokenid,payTok)||exclude[addr]||T.hasState(c))continue;val=T.coinValue(c);if(val.gt(0)){chosen.push(c);sum=sum.add(val);}}if(chosen.length>=(maxCoins||T.MAX_FUNDING_INPUTS)&&sum.lt(needed))return done("Your wallet needs more than "+(maxCoins||T.MAX_FUNDING_INPUTS)+" coins to fund this — consolidate them and retry");if(sum.lt(needed))return done("Insufficient confirmed funds for trade");done(null,chosen,sum);});};
+  T.coinQuery = function(tok){return PandaFunding.query(tok,"");};
+  T.findCoins = function(cmd,payTok,needed,exclude,maxCoins,done){PandaFunding.select(cmd,payTok,needed,exclude,maxCoins||8,done);};
   /* ---- composite (order book + PandaPools reserves in one transaction) ----
      `trackall:false` is load-bearing and was WRONG here before: with trackall:true every coin at
      a pool address reads as wallet-relevant, so every stranger's liquidity looked like the user's
@@ -122,7 +107,7 @@ var PandaTxn = PandaTxn || {};
      issue, and DexTxnCompositeLayoutTest asserts the false. */
   T.ensurePools = function(cmd,allocs,idx,done){var p,script;if(idx>=(allocs||[]).length)return done(null);p=allocs[idx].pool;script=p.covenantScript||PandaPool.script(p.opk,p.oadr,p.tok,p.kmin);cmd("newscript trackall:false script:"+PandaPool.scriptArg(script),function(r){if(!r||!r.status)return done("Could not register the pool covenant"+((r&&r.error)?": "+r.error:"")); T.ensurePools(cmd,allocs,idx+1,done);});};
   T.prepareComposite = function(plan,takerBuys){var prep={route:plan.poolRoute,payTok:takerBuys?P.USDT:"0x00",needed:P.d(0),payments:[],partial:null,partialRem:null,partialNewWant:null},i,t,o,lockedTake,pay;for(i=0;i<(plan.orderTakes||[]).length;i++){t=plan.orderTakes[i];o=t.order;lockedTake=!t.partial?P.d(o.locked):(o.sell?P.d(t.minima):P.up(P.d(t.minima).mul(o.price),P.DP));pay=t.partial?P.up(P.d(o.wantAmt).mul(lockedTake).div(o.locked),P.DP):P.d(o.wantAmt);prep.payments.push([P.plain(pay),o.wantAddr,o.wantTok]);prep.needed=prep.needed.add(pay);if(t.partial){prep.partial=t;prep.partialRem=P.d(o.locked).sub(lockedTake);prep.partialNewWant=P.up(P.d(o.wantAmt).mul(prep.partialRem).div(o.locked),P.DP);if(prep.partialNewWant.gt(o.wantAmt))prep.partialNewWant=P.d(o.wantAmt);}}if(prep.route&&prep.route.ok)prep.needed=prep.needed.add(prep.route.totalIn);return prep;};
-  T.fillComposite = function(cmd,identity,plan,takerBuys,done){var prep,exclude={},i,a;if(!plan||PandaComposite.isEmpty(plan))return done("Nothing to fill");prep=T.prepareComposite(plan,!!takerBuys);exclude[String(P.ADDR).toLowerCase()]=true;if(prep.route){for(i=0;i<(prep.route.pairAddresses||[]).length;i++)exclude[String(prep.route.pairAddresses[i]||"").toLowerCase()]=true;for(i=0;i<(prep.route.allocs||[]).length;i++){a=prep.route.allocs[i];exclude[String(a.pool.address||"").toLowerCase()]=true;exclude[String(a.pool.oadr||"").toLowerCase()]=true;}}T.stage("Selecting funding coins…");T.findCoins(cmd,prep.payTok,prep.needed,exclude,8,function(err,coins,sum){if(err)return done(err);T.stage("Registering pool scripts…");T.ensurePools(cmd,prep.route&&prep.route.ok?prep.route.allocs:[],0,function(perr){if(perr)return done(perr);T.buildComposite(cmd,identity,plan,prep,!!takerBuys,coins,sum,done);});});};
+  T.fillComposite = function(cmd,identity,plan,takerBuys,done){var prep,exclude={},i,a;if(!plan||PandaComposite.isEmpty(plan))return done("Nothing to fill");prep=T.prepareComposite(plan,!!takerBuys);exclude[String(P.ADDR).toLowerCase()]=true;if(prep.route){for(i=0;i<(prep.route.pairAddresses||[]).length;i++)exclude[String(prep.route.pairAddresses[i]||"").toLowerCase()]=true;for(i=0;i<(prep.route.allocs||[]).length;i++){a=prep.route.allocs[i];exclude[String(a.pool.address||"").toLowerCase()]=true;exclude[String(a.pool.oadr||"").toLowerCase()]=true;}}T.progress("Selecting funding coins…");T.findCoins(cmd,prep.payTok,prep.needed,exclude,8,function(err,coins,sum){if(err)return done(err);T.progress("Registering pool scripts…");T.ensurePools(cmd,prep.route&&prep.route.ok?prep.route.allocs:[],0,function(perr){if(perr)return done(perr);T.buildComposite(cmd,identity,plan,prep,!!takerBuys,coins,sum,done);});});};
   /* Pure so the covenant's index rules are directly testable: pool reserve PAIRS first (even leg
      MINIMA, odd leg token), then whole order coins, then funding; outputs recreate each pool, then
      index-matched order payments, then the single partial remainder, then proceeds, then change. */
@@ -133,15 +118,14 @@ var PandaTxn = PandaTxn || {};
   T.create = function(cmd,identity,input,done){var minima=P.down(input.minima,P.DP),price=P.d(input.price),usdt=P.up(minima.mul(price),P.DP),buy=!!input.buy,lock=buy?usdt:minima,want=buy?minima:usdt,minimaRem=P.down(input.minRem||0,P.DP),minRem=buy?P.up(minimaRem.mul(price),P.DP):minimaRem;if(minima.lt(P.MIN_ORDER)||lock.gt(P.MAX_ORDER)||want.gt(P.MAX_ORDER))return done("Order size is outside the permitted range");if(minRem.gt(lock))return done("Minimum remainder is larger than the order itself");/* `send` signs internally, so it needs the gate exactly as much as a txnsign chain does —
      this is the case SignGate.java's javadoc singles out. The `random` call below is read-only
      and deliberately stays outside it. */
-  function sendOrder(oid){var state={"0":identity.publickey,"1":identity.address,"2":P.plain(want),"3":buy?"0x00":P.USDT,"4":oid,"5":buy?"0":"1","6":P.plain(price),"7":input.gtc===false?"0":"1","8":P.plain(minRem)};T.stage("Waiting for the signing lock…");PandaSignLock.gate("send",function(release){T.stage("Signing and sending the order…");cmd("send amount:"+P.plain(lock)+" address:"+P.ADDR+(buy?" tokenid:"+P.USDT:"")+" state:"+JSON.stringify(state),function(r){release.free();done((!r||(!r.status&&!r.pending))&&(T.signError(r&&r.error)||(r&&r.error)||"Order was not accepted"),r&&r.response&&r.response.txpowid,oid);});},function(blocked){done(blocked);});}if(input.orderId)return sendOrder(input.orderId);cmd("random",function(rand){var oid=rand&&rand.status&&rand.response&&rand.response.random;if(!oid)return done("Could not create a safe order id");sendOrder(oid);});};
+  function sendOrder(oid){var state={"0":identity.publickey,"1":identity.address,"2":P.plain(want),"3":buy?"0x00":P.USDT,"4":oid,"5":buy?"0":"1","6":P.plain(price),"7":input.gtc===false?"0":"1","8":P.plain(minRem)};T.progress("Waiting for the signing lock…");PandaSignLock.gate("send",function(release){T.progress("Signing and sending the order…");cmd("send amount:"+P.plain(lock)+" address:"+P.ADDR+(buy?" tokenid:"+P.USDT:"")+" state:"+JSON.stringify(state),function(r){release.free();done((!r||(!r.status&&!r.pending))&&(T.signError(r&&r.error)||(r&&r.error)||"Order was not accepted"),r&&r.response&&r.response.txpowid,oid);});},function(blocked){done(blocked);});}if(input.orderId)return sendOrder(input.orderId);cmd("random",function(rand){var oid=rand&&rand.status&&rand.response&&rand.response.random;if(!oid)return done("Could not create a safe order id");sendOrder(oid);});};
   T.fill = function(cmd,identity,plan,done){
     if(!plan||!plan.takes||!plan.takes.length)return done("Nothing to fill");
     var buy=plan.takes[0].order.sell,payTok=buy?P.USDT:"0x00",needed=P.d(0),i,t,o,partial=null,proceeds=P.d(0),steps=[],id=T.id("sweep"),exclude={};
     exclude[String(P.ADDR).toLowerCase()]=true;
     for(i=0;i<plan.takes.length;i++){t=plan.takes[i];needed=needed.add(t.pay);proceeds=proceeds.add(t.lockedTake);if(t.partial)partial=t;}
-    /* Uses the shared selector so the 8-input cap applies here too. Inlining it meant an
-       unbounded number of funding inputs: a wallet full of dust built a transaction that only
-       the 60KB size gate caught — AFTER signing, burning a one-time key leaf for nothing. */
+    /* Native funding selection counts and bounds reply slices before listing; postGated also
+       caps and claims all transaction inputs before signing. */
     T.findCoins(cmd,payTok,needed,exclude,T.MAX_FUNDING_INPUTS,function(err,chosen,sum){
       if(err)return done(err==="Insufficient confirmed funds for trade"?"Insufficient confirmed funds for this sweep":err);
       steps.push("txncreate id:"+id);for(i=0;i<plan.takes.length;i++)steps.push("txninput id:"+id+" coinid:"+plan.takes[i].order.coinid);for(i=0;i<chosen.length;i++)steps.push("txninput id:"+id+" coinid:"+chosen[i].coinid);

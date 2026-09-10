@@ -30,3 +30,17 @@ PandaSafety.positiveInteger = function(value) {
 PandaSafety.tipBlock = function(reply) {
   return PandaSafety.truthy(reply&&reply.status) ? PandaSafety.positiveInteger(reply&&reply.response&&reply.response.block) : 0;
 };
+
+PandaSafety.hex = function(value) { return typeof value === "string" && value.length<=1026 && /^0x(?:[0-9a-fA-F]{2})+$/.test(value); };
+/* Util.decOr's bounded BigDecimal syntax/scale/precision, before constructing a Decimal. */
+PandaSafety.decimal = function(value) {
+  if (typeof value!=="string" && typeof value!=="number") return null;
+  var s=String(value).replace(/^\s+|\s+$/g,""), m, digits, scale;
+  if(!s || s.length>100)return null;
+  m=/^[+-]?(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(s);
+  if(!m)return null;
+  digits=((m[1]||"")+(m[2]||m[3]||"")).replace(/^0+/,"")||"0";
+  scale=(m[2]||m[3]||"").length-Number(m[4]||0);
+  if(digits.length>44 || Math.abs(scale)>44)return null;
+  try{return PandaDEX.d(s);}catch(ignore){return null;}
+};
