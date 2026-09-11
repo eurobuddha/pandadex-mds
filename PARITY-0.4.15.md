@@ -54,3 +54,9 @@ Ported native `DexDb` additive migration behavior: older saved market and person
 ## Live validation authorization
 
 The user explicitly authorized small real-money trades on the S10 Plus on 2026-09-11. The working validation limit is 1 MINIMA equivalent per test leg, with a live quote check and on-chain verification before the next leg. This authorizes bounded live validation after the candidate passes offline checks; it does not authorize changing seeds, wiping data or spending larger existing maker allocations. Full parity is still in progress.
+
+## 0.4.12 validation
+
+Ported native `ChainEvidence` and the included-spend portion of `DexHistory`: bounded history lookup now requires a stock `txpow onchain` proof, retains the immutable transaction ID and exact input index, and obtains time only from the matching inclusion block with transaction membership. An unrelated payout at another input's output index cannot settle this order. Cached proof coordinates retain their process epoch and acceptance order for subsequent recovery work.
+
+`node test.js` passed, including native inclusion-time vectors, malformed confirmations/timestamps, wrong block identity/height/membership, mempool rejection, immutable transaction identity and competing payout positions. `git diff --check` passed. This is the proof foundation only: durable discovery, exact partial-fill classification, receipt recovery and removal of older balance/coin-coincidence inference remain outstanding. No intermediate MDS package has been built or published.

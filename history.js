@@ -41,7 +41,7 @@ var PandaHistory = PandaHistory || {};
   H.isMinima = function (tok) { return !tok || String(tok).toUpperCase() === "0X00" || String(tok) === "0x00"; };
   H.value = function (coin) {
     if (!coin) return "0";
-    return H.isMinima(coin.tokenid) ? String(coin.amount || "0") : String(coin.tokenamount || coin.amount || "0");
+    return H.isMinima(coin.tokenid) ? String(coin.amount || "0") : String(coin.tokenamount || "0");
   };
   H.coinsOf = function (tx, which) {
     var body = tx && tx.body, txn = body && body.txn, arr = txn && txn[which];
@@ -65,46 +65,51 @@ var PandaHistory = PandaHistory || {};
     return null;
   };
 
-  /* Walk recent wallet history until every wanted coinid is accounted for, or the budget runs out.
-     cb({coinid: {txpowid, outputs}}) — only coins actually found are present. */
-  H.findSpends = function (cmd, coinids, cb) {
-    var wanted = {}, found = {}, remaining = 0, i,
-        state = { pageMax: H.PAGE_MAX, fetches: 0, skips: 0 };
-    for (i = 0; i < (coinids || []).length; i++) { if (!wanted[coinids[i]]) { wanted[coinids[i]] = true; remaining++; } }
-    if (!remaining) return cb({});
-
-    function page(offset) {
-      if (state.fetches++ >= H.MAX_FETCHES) return cb(found);
-      cmd("history relevant:true max:" + state.pageMax + " offset:" + offset, function (reply) {
-        var resp = (reply && reply.status) ? reply.response : null,
-            txpows = resp && Array.isArray(resp.txpows) ? resp.txpows : null,
-            got, j, k, tx, ins, outs, id;
-        /* A dropped or over-cap page: halve and ask again for the SAME offset. */
-        if (!txpows) {
-          if (state.pageMax > 1) { state.pageMax = Math.max(1, Math.floor(state.pageMax / 2)); return page(offset); }
-          if (++state.skips <= H.MAX_SKIP) return page(offset + 1);
-          return cb(found);
+  /* Native DexHistory pager: source input match plus stock on-chain inclusion. Neither mempool
+     presence nor a transaction creator's proposed header timestamp is confirmation evidence. */
+  H.findSpends = function(cmd,coinids,cb,options) {
+    options=options||{};
+    var wanted={},found={},remaining=0,pageMax=H.PAGE_MAX,fetches=0,checks=0,skips=0,finished=false,checked={},i;
+    for(i=0;i<(coinids||[]).length;i++)if(coinids[i]&&!wanted[String(coinids[i]).toLowerCase()]){wanted[String(coinids[i]).toLowerCase()]=coinids[i];remaining++;}
+    function done(){if(finished)return;finished=true;cb(found);}
+    function call(command,next){var called=false;cmd(command,function(reply){if(called||finished)return;called=true;next(reply);});}
+    function page(offset){
+      if(finished)return;if(fetches++>=H.MAX_FETCHES)return done();
+      call("history relevant:"+(options.relevant===false?"false":"true")+" max:"+pageMax+" offset:"+offset,function(reply){
+        var response=reply&&reply.response,txpows=response&&response.txpows;
+        if(!PandaSafety.truthy(reply&&reply.status)||!Array.isArray(txpows)||txpows.length>pageMax){
+          if(pageMax>1){pageMax=Math.max(1,Math.floor(pageMax/2));return page(offset);}
+          if(++skips<=H.MAX_SKIP)return page(offset+1);return done();
         }
-        state.skips = 0;
-        got = txpows.length;
-        for (j = 0; j < got && remaining > 0; j++) {
-          tx = txpows[j];
-          ins = H.coinsOf(tx, "inputs");
-          outs = H.coinsOf(tx, "outputs");
-          for (k = 0; k < ins.length; k++) {
-            id = ins[k] && ins[k].coinid;
-            if (id && wanted[id] && !found[id]) {
-              found[id] = { txpowid: (tx && tx.txpowid) || "", outputs: outs };
-              remaining--;
-            }
-          }
-        }
-        if (!remaining) return cb(found);
-        if (got < state.pageMax) return cb(found);   /* reached the end of history */
-        page(offset + got);
+        skips=0;inspect(txpows,0,offset);
       });
     }
-    page(0);
+    function inspect(txpows,index,offset){
+      var j,tx,txid,ins,k,relevant,id;
+      for(j=index;j<txpows.length&&remaining>0;j++){
+        tx=txpows[j];txid=tx&&tx.txpowid;
+        if(!PandaSafety.hex(txid)||checked[txid.toLowerCase()])continue;
+        ins=H.coinsOf(tx,"inputs");relevant=false;
+        for(k=0;k<ins.length;k++){id=ins[k]&&ins[k].coinid;if(id&&wanted[String(id).toLowerCase()]&&!found[wanted[String(id).toLowerCase()]])relevant=true;}
+        if(!relevant)continue;if(checks++>=H.MAX_FETCHES)return done();checked[txid.toLowerCase()]=true;
+        verify(tx,j+1,txpows,offset);return;
+      }
+      if(!remaining||txpows.length<pageMax)return done();page(offset+txpows.length);
+    }
+    function verify(tx,next,txpows,offset){
+      call("txpow onchain:"+tx.txpowid,function(inclusion){
+        if(PandaChain.depth(inclusion)<0)return inspect(txpows,next,offset);
+        var order=++PandaChain.order,at=Date.now(),blockid=PandaChain.blockId(inclusion);
+        function accept(time){var ins=H.coinsOf(tx,"inputs"),i,id,key;for(i=0;i<ins.length;i++){id=ins[i]&&ins[i].coinid;key=id&&wanted[String(id).toLowerCase()];if(key&&!found[key]){found[key]=PandaChain.proof(tx,i,inclusion,time,order,at);remaining--;}}inspect(txpows,next,offset);}
+        if(blockid&&PandaChain.block(inclusion)>0)call("txpow txpowid:"+blockid,function(block){accept(PandaChain.inclusionTime(inclusion,block,tx.txpowid));});
+        else accept(0);
+      });
+    }
+    if(!remaining)return done();page(0);
+  };
+  H.verdictForSpend = function(spend,order,eq) {
+    if(!spend||spend.confirmations<0||!spend.input||!H.same(spend.input.coinid,order.coinid)||spend.inputIndex<0||spend.inputIndex>=spend.outputs.length)return null;
+    return H.verdictFor([spend.outputs[spend.inputIndex]],order,eq);
   };
 
 })(PandaHistory);

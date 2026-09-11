@@ -1,5 +1,5 @@
 /* ES5 service: the sole chain/transaction owner. Never touches the DOM. */
-MDS.load("safety.js"); MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("funding.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("pool.js"); MDS.load("composite.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js"); MDS.load("split.js"); MDS.load("history.js");
+MDS.load("safety.js"); MDS.load("decimal.js"); MDS.load("covenant.js"); MDS.load("funding.js"); MDS.load("signlock.js"); MDS.load("book.js"); MDS.load("pool.js"); MDS.load("composite.js"); MDS.load("txn.js"); MDS.load("tape.js"); MDS.load("maker.js"); MDS.load("price.js"); MDS.load("verifier.js"); MDS.load("pending.js"); MDS.load("stats.js"); MDS.load("split.js"); MDS.load("chain.js"); MDS.load("history.js");
 
 var PDService = { book:[], block:0, identity:null, keyset:{}, addrset:{}, keysReady:false, keysRetryBlock:0, ready:false, scanning:false, rescan:false, busy:false,
   activityLog:[], logSequence:0, logSession:String(Date.now()), lastLogMessage:"", pendingRows:[], pendingRefs:{}, filling:{}, stage:"", stageAtMs:0, busyBlock:0, fillCoins:null, fillBlock:0, fillMeta:null, tape:[], myTrades:[],
@@ -306,11 +306,11 @@ PDService.settleVanished = function() {
     for (j = 0; j < batch.length; j++) {
       it = batch[j];
       spend = spends[it.coinid];
-      verdict = spend ? PandaHistory.verdictFor(spend.outputs, it.order, PDService.sameAmount) : null;
+      verdict = spend ? PandaHistory.verdictForSpend(spend, it.order, PDService.sameAmount) : null;
       if (!verdict) { rest.push(it); continue; }
       settled[it.coinid] = true;
       if (verdict === "CANCELLED") { PDService.noteCancelled(it.coinid); continue; }
-      PDService.storeObservedFill(it.coinid, it.order, it.size, it.price, it.buy, false, spend.txpowid, "CHAIN_VERIFIED");
+      PDService.storeObservedFill(it.coinid, it.order, it.size, it.price, it.buy, false, spend.txpowid, "CHAIN_VERIFIED", spend);
     }
     if (!rest.length) return;
     PandaVerify.verifyBatch(PDService.cmd, rest, PDService.block, function(verdicts) {
@@ -326,17 +326,17 @@ PDService.settleVanished = function() {
   });
 };
 PDService.sameAmount = function(a, b) { try { return PandaDEX.d(a).eq(PandaDEX.d(b)); } catch (ignore) { return false; } };
-PDService.storeObservedFill = function(spentCoin, order, size, price, takerBuy, partial, txpowid, how) {
-  var mine = PDService.owns(order);
-  PandaTape.addFill({spentcoin:spentCoin, timems:Date.now(), block:PDService.block, price:price,
+PDService.storeObservedFill = function(spentCoin, order, size, price, takerBuy, partial, txpowid, how, proof) {
+  var mine = PDService.owns(order), time=proof&&proof.inclusionTimeMs>0?proof.inclusionTimeMs:Date.now(), block=proof&&proof.inclusionBlock>0?proof.inclusionBlock:PDService.block;
+  PandaTape.addFill({spentcoin:spentCoin, timems:time, block:block, price:price,
     size:size, buy:takerBuy, partial:partial === true && size.lt(order.minima), mine:mine}, function() {
     if (mine) {
-      PandaTape.addMyTrade({spentcoin:spentCoin, timems:Date.now(), block:PDService.block, price:price,
+      PandaTape.addMyTrade({spentcoin:spentCoin, timems:time, block:block, price:price,
         size:size, buy:takerBuy, maker:true, orderid:order.orderId, txpowid:txpowid || "", sourceKind:"BOOK",
         verificationStatus:how || "LOCAL_VERIFIED",
-        verificationNote:(how === "CHAIN_VERIFIED" ? "Read from the transaction that spent the order coin"
+        verificationNote:(how === "CHAIN_VERIFIED" ? "Read from the included transaction at this order input index" + (proof&&proof.inclusionTimeMs>0?". Time basis: verified inclusion block.":". Time basis: observation on this device.")
           : (partial ? "Partial fill proven by successor order" : "Full fill proven by payout evidence")),
-        verifiedBlock:PDService.block}, function(added) {
+        verifiedBlock:block}, function(added) {
           if (added) PDService.notify((partial === true && size.lt(order.minima) ? "Order partially filled: " : "Order filled: ") + (order.sell ? "Sold " : "Bought ") + PandaDEX.plain(size) + " MINIMA @ " + PandaDEX.plain(price) + " mxUSDT");
           PDService.loadTape(function() { PDService.snapshot(); });
         });

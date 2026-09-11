@@ -1,7 +1,7 @@
 /* Pure regression tests; run with `node test.js`. */
 var assert=require("assert"), fs=require("fs"), vm=require("vm");
 global.Decimal=require("./decimal.js");
-["safety.js","covenant.js","funding.js","balance.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js","zip.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
+["safety.js","covenant.js","funding.js","balance.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js","zip.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
 var C={coinid:"0x01",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xabc","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
 var poison=JSON.parse(JSON.stringify(C)); poison.state["3"]="0x00"; assert.strictEqual(PandaDEX.order(poison),null);
@@ -499,7 +499,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   vmmod.createContext(sandbox);
   /* Exactly the list service.js loads, in the same order. */
   ["safety.js","decimal.js","covenant.js","funding.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
-   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js"].forEach(function (f) {
+   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js"].forEach(function (f) {
     try { vmmod.runInContext(fsmod.readFileSync(f, "utf8"), sandbox, { filename: f }); }
     catch (error) { throw new Error(f + " cannot load in the MDS service scope: " + error); }
   });
@@ -539,7 +539,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   /* A host method must be CALLED on its owner, never passed or stored. Detaching one is invisible
      under Node and fatal on the node. */
   ["safety.js","funding.js","signlock.js","price.js","txn.js","service.js","tape.js","pool.js","composite.js","book.js",
-   "covenant.js","maker.js","verifier.js","pending.js","stats.js","split.js","history.js"].forEach(function (f) {
+   "covenant.js","maker.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js"].forEach(function (f) {
     var src = fsmod.readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
     /* `if (MDS.notify)` and `typeof MDS.log` are existence checks, not detachments — strip them
        before looking for a host method being passed as an argument or assigned to a variable. */
@@ -605,7 +605,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   };
   vmmod.createContext(sandbox);
   ["safety.js","decimal.js","covenant.js","funding.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
-   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js"].forEach(function (f) {
+   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js"].forEach(function (f) {
     vmmod.runInContext(fsmod.readFileSync(f, "utf8"), sandbox, { filename:f });
   });
   ADDR = vmmod.runInContext("PandaDEX.ADDR", sandbox);
@@ -681,7 +681,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   };
   vmmod.createContext(sandbox);
   ["safety.js","decimal.js","covenant.js","funding.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
-   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","history.js"].forEach(function(f){
+   "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js"].forEach(function(f){
     vmmod.runInContext(fsmod.readFileSync(f,"utf8"), sandbox, {filename:f});
   });
   ADDR = vmmod.runInContext("PandaDEX.ADDR", sandbox);
@@ -795,12 +795,14 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   var pages = [], calls = [];
   function hist(cmd, cb) {
     calls.push(cmd);
+    if(cmd.indexOf("txpow onchain:")===0)return cb({status:true,response:{found:true,confirmations:4,block:100,blockid:"0xbeef"}});
+    if(cmd.indexOf("txpow txpowid:")===0)return cb({status:true,response:{txpowid:"0xbeef",isblock:true,header:{block:100,timemilli:123456},body:{txnlist:["0x7102"]}}});
     var max = Number((cmd.match(/max:(\d+)/) || [])[1] || 0),
         off = Number((cmd.match(/offset:(\d+)/) || [])[1] || 0);
     if (max > 4) return cb({ status:true, response:{} });           /* over-cap: no txpows array */
     if (off === 0) return cb({ status:true, response:{ txpows:[
-      { txpowid:"0xtx1", body:{ txn:{ inputs:[{coinid:"0xother"}], outputs:[] } } },
-      { txpowid:"0xtx2", body:{ txn:{ inputs:[{coinid:"0xac01"}],
+      { txpowid:"0x7101", body:{ txn:{ inputs:[{coinid:"0xother"}], outputs:[] } } },
+      { txpowid:"0x7102", body:{ txn:{ inputs:[{coinid:"0xac01"}],
         outputs:[{address:MY, tokenid:PandaDEX.USDT, tokenamount:"5"}] } } }
     ] } });
     return cb({ status:true, response:{ txpows:[] } });
@@ -808,7 +810,8 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   var out = null;
   PandaHistory.findSpends(hist, ["0xac01"], function (found) { out = found; });
   assert(out && out["0xac01"], "history did not find the transaction that spent the coin");
-  assert.strictEqual(out["0xac01"].txpowid, "0xtx2");
+  assert.strictEqual(out["0xac01"].txpowid, "0x7102");
+  assert.strictEqual(out["0xac01"].inclusionTimeMs,123456);assert.strictEqual(out["0xac01"].inputIndex,0);
   assert.strictEqual(PandaHistory.verdictFor(out["0xac01"].outputs, askOrder, eq), "FILLED");
   assert(calls.length >= 2 && calls[0].indexOf("max:8") > 0 && calls[1].indexOf("max:4") > 0,
     "an over-cap page must halve and retry the same offset");
@@ -1114,5 +1117,27 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
     PandaTape.addMyTrade({spentcoin:"0x9901",timems:100,block:10,price:PandaDEX.d(1),size:PandaDEX.d(1)},function(){});
     assert(!sql.some(function(q){return q.indexOf("DELETE FROM `my_trades`")===0;}),"personal history is not a rolling cache");
   } finally {global.MDS=oldMds;}
+})();
+/* Native InclusionTimeTest and transaction-position evidence cases. */
+(function(){
+  var inclusion={status:true,response:{found:true,confirmations:"4",block:"100",blockid:"0xbeef"}},
+      block={status:true,response:{txpowid:"0xbeef",isblock:true,header:{block:"100",timemilli:"1788000000123"},body:{txnlist:["0xaabb"]}}};
+  function copy(v){return JSON.parse(JSON.stringify(v));}
+  assert.strictEqual(PandaChain.inclusionTime(inclusion,block,"0xaabb"),1788000000123);
+  var bad=copy(block);bad.response.txpowid="0xdead";assert.strictEqual(PandaChain.inclusionTime(inclusion,bad,"0xaabb"),0);
+  bad=copy(block);bad.response.header.block="101";assert.strictEqual(PandaChain.inclusionTime(inclusion,bad,"0xaabb"),0);
+  assert.strictEqual(PandaChain.inclusionTime(inclusion,block,"0xdead"),0);
+  bad=copy(block);bad.response.isblock=false;assert.strictEqual(PandaChain.inclusionTime(inclusion,bad,"0xaabb"),0);
+  [null,"-1","1.5","1e999999",true,"9007199254740992","0"].forEach(function(v){var b=copy(block);b.response.header.timemilli=v;assert.strictEqual(PandaChain.inclusionTime(inclusion,b,"0xaabb"),0);});
+  [-1,1.5,"NaN","999999999999999999"].forEach(function(v){var r=copy(inclusion);r.response.confirmations=v;assert.strictEqual(PandaChain.depth(r),-1);});
+  var order={coinid:"0xac01",wantAddr:"0xcccc",wantTok:PandaDEX.USDT,wantAmt:PandaDEX.d(5),lockedTok:"0x00",locked:PandaDEX.d(1000)},
+      outputs=[{address:"0xdddd",tokenid:"0x00",amount:"1"},{address:"0xcccc",tokenid:PandaDEX.USDT,tokenamount:"5"}],
+      spend={confirmations:4,input:{coinid:"0xac01"},inputIndex:0,outputs:outputs};
+  assert.strictEqual(PandaHistory.verdictForSpend(spend,order,function(a,b){return PandaDEX.d(a).eq(b);}),null,"another input's output cannot prove this order");
+  spend.inputIndex=1;assert.strictEqual(PandaHistory.verdictForSpend(spend,order,function(a,b){return PandaDEX.d(a).eq(b);}),"FILLED");
+  var tx={txpowid:"0xaabb",header:{timemilli:"9999999999999"},body:{txn:{transactionid:"0xeeee",inputs:[{coinid:"0xac01"}],outputs:outputs}}},found;
+  function node(c,cb){if(c.indexOf("history ")===0)return cb({status:true,response:{txpows:[tx]}});if(c.indexOf("txpow onchain:")===0)return cb(inclusion);cb(block);}
+  PandaHistory.findSpends(node,["0xac01"],function(r){found=r;});assert.strictEqual(found["0xac01"].inclusionTimeMs,1788000000123);assert.strictEqual(found["0xac01"].transactionId,"0xeeee");
+  inclusion.response.found=false;PandaHistory.findSpends(node,["0xac01"],function(r){found=r;});assert.strictEqual(Object.keys(found).length,0,"mempool/unincluded transactions cannot become spend proof");
 })();
 console.log("PandaDEX pure tests passed");
