@@ -10,7 +10,7 @@ This document supersedes the older PARITY.md target of APK 0.3.9.
 | Live transaction feedback | Ported for 0.4.7; immediate request feedback, 60 service messages, three-line summary, expanded dialog updates live. |
 | Keyboard | Browser viewport requests content resizing; mobile runtime validation pending. |
 | Transaction construction and submission | Port strict funding, validation, command/session boundaries, durable pre-post records and uncertain-result handling. |
-| Maker authorization | Port identity/config epochs, quote checks and durable position recovery. |
+| Maker authorization | **Done 0.4.17 + 0.4.18.** Quote guard revalidates captured intent before every action; `quoteRevision` epochs settings writes; a failed maker write latches quoting off until an explicit user save; slot records are service-owned and carry the funded locked baseline. |
 | Owner/taker receipts and chain review | Port exact spend linkage, inclusion/reorg checks, conservative legacy repair and durable recovery. |
 | Market history | Port pool executions, immediate taker indexing, bounded public history discovery and correct chain timestamps. |
 | Balances and exports | Port unknown/stale reads, evidence-aware exports and failure handling. |
@@ -60,3 +60,26 @@ The user explicitly authorized small real-money trades on the S10 Plus on 2026-0
 Ported native `ChainEvidence` and the included-spend portion of `DexHistory`: bounded history lookup now requires a stock `txpow onchain` proof, retains the immutable transaction ID and exact input index, and obtains time only from the matching inclusion block with transaction membership. An unrelated payout at another input's output index cannot settle this order. Cached proof coordinates retain their process epoch and acceptance order for subsequent recovery work.
 
 `node test.js` passed, including native inclusion-time vectors, malformed confirmations/timestamps, wrong block identity/height/membership, mempool rejection, immutable transaction identity and competing payout positions. `git diff --check` passed. This is the proof foundation only: durable discovery, exact partial-fill classification, receipt recovery and removal of older balance/coin-coincidence inference remain outstanding. No intermediate MDS package has been built or published.
+
+## 0.4.13 – 0.4.18 validation
+
+Ported native `Order5` state validation, `DexTxn.safeOrder` and `KeySet` (0.4.13); stock MiniNumber
+precision for every node-reported amount, which is native 0.4.20 plus the 0.4.16 fix the port never
+received (0.4.14); the MxUSD rename, native 0.4.19 (0.4.15); state-aware loading/failed/not-connected
+placeholders, native 0.4.17 + 0.4.18 (0.4.16); `MakerQuoteGuard`, `quoteRevision` and the
+storage-health latch (0.4.17); `MakerPosition` (0.4.18).
+
+`node test.js` passes at every version. The 0.4.17 and 0.4.18 assertions were mutation-checked rather
+than merely run: neutering the guard, the revision check, the armed check or the widening recheck each
+fails the suite, as does dropping the locked-token match, letting an unknown baseline adjust, treating
+a legacy buy record as a sell, or reverting to the old requested-size comparison.
+
+Two defects were found in the MDS by this work rather than ported from native. A repriced BUY read as
+part-filled, because its MINIMA is the want side; a part-filled rung is protected from adjustment, so a
+pegged ladder's bids froze after their first reprice. And slot records round-tripped through the page,
+so a stale snapshot could hand the service a ladder memory older than the truth — they are now
+service-owned.
+
+Still outstanding, unchanged: `ReceiptRepair`, `OwnerRecovery`/`TakerRecovery`, `SubmissionIds`, the
+write-ahead `preparedCreate` intent, and durable historical discovery. No live validation has been
+performed on any of these versions; everything above is offline.
