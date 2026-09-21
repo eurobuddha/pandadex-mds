@@ -3,6 +3,35 @@
 Newest first. Each entry names the native PandaDEX version it reaches parity with, and the specific
 on-chain failure it prevents.
 
+## [0.4.16] — loading, failed and not-connected were all the same message
+
+Ports native 0.4.17 + 0.4.18. `PandaBalance.message(ready, failed)`; per-asset failure tracking with
+tap-to-retry; the receive address and the open-orders card say why they are empty; the node pill says
+CONNECTING… rather than PAIRING… — a MiniDapp does not pair.
+
+## [0.4.15] — the dollar token is MxUSD
+
+Ports native 0.4.19. 42 display occurrences renamed. Token id, element ids and trade-export CSV column
+keys unchanged, so existing ledgers still parse.
+
+## [0.4.14] — no wallet with more than eight coins of a token could fund anything
+
+Ports native 0.4.20, and with it the 0.4.16 fix that never reached the MDS. Stock MiniNumber amounts
+carry up to 64 significant digits and 44 decimal places; an S10 Plus on MinimaCore 1.1.2.3 reports 48.
+`PandaSafety.decimal` caps at 44, which is right for amounts the app BUILDS and wrong for amounts the
+node REPORTS. `funding.js` used it on the per-address `sendable`, so the selector aborted with "Could
+not read the available balance" before listing a coin; `F.value` used it on each coin's own amount;
+`balance.js` used it on confirmed/sendable/unconfirmed, so the ASSETS card read as unknown.
+`PandaSafety.balanceDecimal` (64 digits) now parses everything the node reports.
+
+## [0.4.13] — an owner who could not be confirmed was treated as an owner
+
+Ports the APK's `Order5` state validation, `DexTxn.safeOrder` and `KeySet`. Ports 5/7/8 are validated
+strictly; cancel, cancelBatch, relock and collectExpired refuse a malformed order; `loadKeys` derives
+addresses with `runscript` per key and only a COMPLETE load becomes the ownership snapshot, so
+`owns()` no longer falls back to "any key matches" and `holdsKey` refuses rather than permits while
+keys are unreadable.
+
 ## [0.4.6] — proceeds reported "unconfirmed" for as long as the page stayed open
 
 **Fixed — a stale read, not a stuck coin.** After a sale on 0.4.5 the ASSETS card still showed the
