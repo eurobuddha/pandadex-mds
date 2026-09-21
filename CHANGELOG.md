@@ -3,6 +3,17 @@
 Newest first. Each entry names the native PandaDEX version it reaches parity with, and the specific
 on-chain failure it prevents.
 
+## [0.4.20] — the expanded activity log read upside down and you had to scroll to close it
+
+Reported live. Three separate problems in one dialog:
+
+- It listed newest-first, like the pill. The pill is right to do that — it shows three lines and the
+  newest is the one you need. A full log is a terminal: oldest at the top, newest at the bottom.
+- The whole dialog scrolled, heading and Close button included, so reaching Close meant scrolling to
+  the end of the log. Now only the log scrolls; the heading and Close stay put.
+- Nothing pinned it to the bottom, so a live transaction scrolled out of view. It now sticks to the
+  newest line — unless you have scrolled up to read something, in which case it leaves you there.
+
 ## [0.4.19] — a trade that worked never said so
 
 Reported live on 0.4.18: a blended SELL of 1160.09 MINIMA settled on chain, the log stopped at

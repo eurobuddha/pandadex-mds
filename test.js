@@ -1010,7 +1010,17 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   assert(dialog.open && node("logFull").textContent.indexOf("Signing transaction")>=0);
   scope.state.activityLog.unshift({id:2,at:2000,text:"Submitted; checking on-chain"}); scope.ingestActivity(scope.state);
   assert.strictEqual(node("activityLogDialog"),dialog); assert(dialog.open);
-  assert(node("logFull").textContent.split("\n\n")[0].indexOf("Submitted; checking on-chain")>=0);
+  /* The modal is a TERMINAL: oldest at the top, newest at the bottom. The pill is the opposite,
+     because it only has room for three lines and the newest is the one you need to see. Reported
+     live on 0.4.19: "it's upside down, and then it spills off the screen". */
+  var full=node("logFull").textContent, blocks=full.split("\n\n");
+  assert(blocks[blocks.length-1].indexOf("Submitted; checking on-chain")>=0,
+    "the newest entry must be the LAST line of the modal");
+  assert(full.indexOf("Request sent: LIMIT") < full.indexOf("Signing transaction")
+      && full.indexOf("Signing transaction") < full.indexOf("Submitted; checking on-chain"),
+    "the whole modal runs oldest to newest, top to bottom");
+  assert(node("logRecent").textContent.split("\n")[0].indexOf("Submitted; checking on-chain")>=0,
+    "the pill stays newest-first");
   var count=scope.activityLines.length; scope.ingestActivity(scope.state); assert.strictEqual(scope.activityLines.length,count);
   scope.stageText="Signing";scope.stageAt=Date.now()-60000;assert.strictEqual(scope.liveStage(),"Signing");
   scope.state.busy=false;scope.state.awaitingFill=true;assert.strictEqual(scope.liveStage(),"Signing");
