@@ -1092,6 +1092,27 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   var sent=[], result;
   PandaTxn.checkPost(function(c,cb){sent.push(c);cb({status:true});},"duplicate",["txncreate id:duplicate","txninput id:duplicate coinid:0x99dd","txninput id:duplicate coinid:0x99DD"],function(e){result=e;});assert(result);assert.strictEqual(sent.length,0);
 })();
+/* Native 0.4.17 + 0.4.18: a placeholder must follow the real state. Native shipped a fix that told
+   a connected user to connect, and the review of THAT found the open-orders placeholder wrong in
+   the opposite direction. Loading, failed and not-connected are three different answers and the
+   user acts differently on each. */
+(function(){
+  assert.strictEqual(PandaBalance.message(false,false),"Connecting to MinimaCore\u2026");
+  assert.strictEqual(PandaBalance.message(false,true),"Connecting to MinimaCore\u2026","not connected outranks a stale failure");
+  assert.strictEqual(PandaBalance.message(true,false),"Loading balance from MinimaCore\u2026");
+  assert.strictEqual(PandaBalance.message(true,true),"Could not read this balance. Tap to retry.");
+  /* An unloaded card says why, and never tells a connected user to connect. */
+  var blank=PandaBalance.meta(null);
+  assert.strictEqual(PandaBalance.line(blank,function(v){return String(v);},1,true,true),"Could not read this balance. Tap to retry.");
+  assert.strictEqual(PandaBalance.line(blank,function(v){return String(v);},1,false,false),"Connecting to MinimaCore\u2026");
+  assert(PandaBalance.line(blank,function(v){return String(v);},1,true,false).indexOf("Connect to MinimaCore")<0,"the old always-connect placeholder is gone");
+  /* A LOADED card is unaffected by either flag \u2014 it shows the breakdown. */
+  var loaded=PandaBalance.meta({status:true,response:{confirmed:"1",sendable:"1",coins:1}},1);
+  assert(PandaBalance.line(loaded,function(v){return String(v);},1,false,true).indexOf("1 coin ")>=0);
+  /* And the old unconditional strings must be gone from the source that actually held them. */
+  assert.strictEqual(fs.readFileSync("balance.js","utf8").indexOf("Balance not loaded"),-1);
+  assert.strictEqual(fs.readFileSync("index.html","utf8").indexOf("PAIRING"),-1,"a MiniDapp does not pair");
+})();
 /* Stock MiniNumber precision. Balances AND coin amounts carry up to 64 significant digits and 44
    decimal places; the 44-digit order parser refused them, so no wallet holding more than SAFE_COINS
    coins of a token could fund anything — every trade died on "Could not read the available balance."

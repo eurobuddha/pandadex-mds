@@ -78,9 +78,19 @@ var PandaBalance = PandaBalance || {};
     return Math.floor(min / 60) + "h ago";
   };
 
-  B.line = function (meta, fmt, nowMs) {
+  /* Native MainActivity.balanceMessage. A MiniDapp does not pair — it is installed and enabled or
+     it is not — so native's paired/known pair collapses to one "the service has answered" flag.
+     What must NOT collapse is loading vs failed: native 0.4.17 told a connected user to connect,
+     and the review of that fix found 0.4.18, the same placeholder wrong in the other direction.
+     A placeholder that does not follow the real state sends the user somewhere pointless. */
+  B.message = function (ready, failed) {
+    if (!ready) return "Connecting to MinimaCore…";
+    return failed ? "Could not read this balance. Tap to retry." : "Loading balance from MinimaCore…";
+  };
+
+  B.line = function (meta, fmt, nowMs, ready, failed) {
     var SEP = "  ·  ";
-    if(!meta || !meta.at)return "Balance not loaded. Connect to MinimaCore and wait for an update.";
+    if(!meta || !meta.at)return B.message(ready, failed);
     return "confirmed " + fmt(meta.confirmed)
       + SEP + "locked ≈ " + fmt(B.locked(meta))
       + SEP + "unconfirmed " + fmt(meta.unconfirmed)
