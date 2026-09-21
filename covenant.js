@@ -33,18 +33,29 @@ var PandaDEX = PandaDEX || {};
     try {
       var p0=P.state(coin,0), p1=P.state(coin,1), p2=P.state(coin,2), p3=P.state(coin,3), p4=P.state(coin,4);
       if (!coin || !coin.coinid || !p0 || !p1 || !p2 || !p4) return null;
-      var sell = P.state(coin,5) !== "0", tok = coin.tokenid || "0x00";
-      var locked = P.d((P.eqTok(tok,"0x00") ? coin.amount : (coin.tokenamount || coin.amount)) || 0), want=P.d(p2);
+      var side=P.state(coin,5), gtc=P.state(coin,7), minimum=PandaSafety.decimal(P.state(coin,8));
+      if ((side!=="0" && side!=="1") || (gtc!=="0" && gtc!=="1") || !minimum) return null;
+      var sell = side === "1", tok = coin.tokenid || "0x00";
+      var locked = PandaSafety.decimal(P.eqTok(tok,"0x00") ? coin.amount : coin.tokenamount), want=PandaSafety.decimal(p2);
+      if (!P.amountOk(locked) || !P.amountOk(want)) return null;
       var o = { coinid:coin.coinid, ownerPk:p0, wantAddr:p1, wantAmt:want, wantTok:p3 || "0x00", orderId:p4,
-        sell:sell, gtc:P.state(coin,7)==="1", minRem:P.d(P.state(coin,8)||0), locked:locked, lockedTok:tok,
-        created:Number(coin.created||0) };
+        sell:sell, gtc:gtc==="1", minRem:minimum, locked:locked, lockedTok:tok,
+        created:PandaSafety.positiveInteger(coin.created), sourceJson:JSON.stringify(coin) };
       if (!o.locked.gt(0) || !o.wantAmt.gt(0) || !P.fillable(o)) return null;
       o.minima = sell ? locked : want; o.usdt = sell ? want : locked;
       o.price = o.usdt.div(o.minima);
       return o;
     } catch (ignore) { return null; }
   };
+  P.amountOk = function(value) { return !!(value && value.gt(0) && value.lte(P.MAX_ORDER)); };
+  P.safeOrder = function(o) {
+    return !!(o && PandaSafety.hex(o.coinid) && PandaSafety.hex(o.ownerPk) && PandaSafety.hex(o.wantAddr) &&
+      PandaSafety.hex(o.wantTok) && PandaSafety.hex(o.orderId) && PandaSafety.hex(o.lockedTok) &&
+      P.amountOk(PandaSafety.decimal(o.locked.toString())) && P.amountOk(PandaSafety.decimal(o.wantAmt.toString())) &&
+      o.minRem && PandaSafety.decimal(o.minRem.toString()) && o.minRem.gte(0));
+  };
   P.fillable = function (o) {
+    if (!P.safeOrder(o)) return false;
     var expectedWant=o.sell ? P.USDT : "0x00", expectedLock=o.sell ? "0x00" : P.USDT;
     return P.eqTok(o.wantTok, expectedWant) && P.eqTok(o.lockedTok, expectedLock) &&
       /^0x[0-9a-f]{64}$/i.test(o.wantAddr) && !P.eqTok(o.wantAddr,P.ADDR) &&

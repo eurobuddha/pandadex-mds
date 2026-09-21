@@ -110,7 +110,7 @@ PDService.addPendingRows = function(rows, done) {
   PDService.savePending(function() { PDService.snapshot(); if (done) done(); });
 };
 PDService.isMine = function(order) { return !!(order && PDService.keyset[order.ownerPk]); };
-PDService.owns = function(order) { return !!(order && PDService.keyset[order.ownerPk] && (PDService.emptyMap(PDService.addrset) || PDService.addrset[order.wantAddr])); };
+PDService.owns = function(order) { return !!(order && PDService.keyset[order.ownerPk] && PDService.addrset[order.wantAddr]); };
 PDService.emptyMap = function(map) { var k; for (k in map) if (map.hasOwnProperty(k)) return false; return true; };
 PDService.snapshot = function() {
   var mine = [], i, order;
@@ -834,37 +834,39 @@ PDService.scriptArg = function() { return '"' + PandaDEX.script.replace(/"/g, '\
    failed to answer `keys action:list` left the service owning nothing — and owns() returning false
    for the user's own orders is not a display bug: the maker cannot see its own rungs, decides they
    are missing, and posts the whole ladder a second time. Build into local maps and full-replace
-   each half only when the node actually answered. Each half is independent, so a `scripts` failure
-   never discards good keys. Retries ride the block clock; this service runs no timers. */
+   each half only when the node actually answered. Only a complete key and derived-address load becomes fresh. A failed load
+   retains the last complete ownership snapshot for display. Retries ride the block clock; this service runs no timers. */
 PDService.KEY_RETRY_BLOCKS = 4;
 PDService.loadKeys = function(done) {
-  var keys = {}, addrs = {};
-  if (PDService.identity && PDService.identity.publickey) keys[PDService.identity.publickey] = true;
-  if (PDService.identity && PDService.identity.address) addrs[PDService.identity.address] = true;
-  /* Keys rather than the current receive address identify an order owner. A later wallet
-     address must not hide an order that the user can still cancel. */
+  var load={}, keys={}, addrs={}, list=[];
+  PDService.keyLoad=load; PDService.keysReady=false;
+  function current(){return PDService.keyLoad===load;}
+  function finish(ok){if(!current())return;PDService.keyLoad=null;PDService.keysRetryBlock=PDService.block;
+    if(ok){PDService.keyset=keys;PDService.addrset=addrs;PDService.keysReady=true;}if(done)done();}
   PDService.cmd("keys action:list", function(result) {
-    /* Nodes return either response:[{publickey:...}] or response:{keys:[...]}. */
-    var rows = result && result.response, i, entry, key, gotKeys = false;
-    if (rows && !Array.isArray(rows) && Array.isArray(rows.keys)) rows = rows.keys;
-    if (rows && rows.length) for (i = 0; i < rows.length; i++) {
-      entry = rows[i];
-      key = typeof entry === "string" ? entry : (entry.publickey || entry.key);
-      if (key) { keys[key] = true; gotKeys = true; }
+    if(!current())return;
+    var rows=result&&result.response,i,key;
+    if(rows&&!Array.isArray(rows))rows=rows.keys;
+    if(!PandaSafety.truthy(result&&result.status)||!Array.isArray(rows)||!rows.length)return finish(false);
+    for(i=0;i<rows.length;i++){
+      key=typeof rows[i]==="string"?rows[i]:rows[i]&&rows[i].publickey;
+      if(!PandaSafety.hex(key))return finish(false);
+      if(!keys[key]){keys[key]=true;list.push(key);}
     }
-    PDService.cmd("scripts", function(scriptRows) {
-      var scripts = scriptRows && scriptRows.response, j, sc, addr, gotAddrs = false;
-      if (scripts && !Array.isArray(scripts) && Array.isArray(scripts.scripts)) scripts = scripts.scripts;
-      if (scripts && scripts.length) for (j = 0; j < scripts.length; j++) {
-        sc = scripts[j]; addr = typeof sc === "string" ? sc : sc.address;
-        if (addr) { addrs[addr] = true; gotAddrs = true; }
+    function derive(index){
+      if(!current())return;
+      if(index===list.length){
+        if(PDService.identity&&keys[PDService.identity.publickey]&&PandaSafety.hex(PDService.identity.address))addrs[PDService.identity.address]=true;
+        return finish(true);
       }
-      if (gotKeys) PDService.keyset = keys;
-      if (gotAddrs) PDService.addrset = addrs;
-      PDService.keysReady = gotKeys;
-      PDService.keysRetryBlock = PDService.block;
-      done();
-    });
+      PDService.cmd("runscript script:"+JSON.stringify("RETURN SIGNEDBY("+list[index]+")"),function(reply){
+        if(!current())return;
+        var response=reply&&reply.response,address=response&&response.script&&response.script.address;
+        if(!PandaSafety.truthy(reply&&reply.status)||!PandaSafety.truthy(response&&response.parseok)||!PandaSafety.hex(address))return finish(false);
+        addrs[address]=true;derive(index+1);
+      });
+    }
+    derive(0);
   });
 };
 /* True once the node has actually listed the wallet's keys. Until then every ownership answer is
@@ -885,7 +887,7 @@ PDService.boot = function() {
   PandaTxn.stage = function(message) { PDService.setStage(message); };
   /* And let it refuse an owner key this wallet does not hold, rather than sending it to the node
      and surfacing "Public Key not found". Only meaningful once the key set is actually readable. */
-  PandaTxn.holdsKey = function(publickey) { return !PDService.keysUsable() || !!PDService.keyset[publickey]; };
+  PandaTxn.holdsKey = function(publickey) { return PDService.keysUsable() && !!PDService.keyset[publickey]; };
   PDService.cmd("runscript script:" + PDService.scriptArg(), function(scriptResult) {
     var script = scriptResult && scriptResult.response && scriptResult.response.script;
     if (!scriptResult.status || !scriptResult.response.parseok || !script || String(script.address).toUpperCase() !== PandaDEX.ADDR.toUpperCase())

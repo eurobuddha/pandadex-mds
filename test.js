@@ -2,10 +2,11 @@
 var assert=require("assert"), fs=require("fs"), vm=require("vm");
 global.Decimal=require("./decimal.js");
 ["safety.js","covenant.js","funding.js","balance.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js","zip.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
-var C={coinid:"0x01",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xabc","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
+PandaTxn.holdsKey=function(){return true;}; /* test wallet explicitly owns fixture signing keys */
+var C={coinid:"0x01",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xee0006","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
 var poison=JSON.parse(JSON.stringify(C)); poison.state["3"]="0x00"; assert.strictEqual(PandaDEX.order(poison),null);
-var bid=JSON.parse(JSON.stringify(C)); bid.coinid="0x2";bid.tokenid=PandaDEX.USDT;bid.tokenamount="20";bid.state["2"]="10";bid.state["3"]="0x00";bid.state["5"]="0";var buy=PandaDEX.order(bid);assert(buy&&buy.price.eq(2));
+var bid=JSON.parse(JSON.stringify(C)); bid.coinid="0xee0002";bid.tokenid=PandaDEX.USDT;bid.tokenamount="20";bid.state["2"]="10";bid.state["3"]="0x00";bid.state["5"]="0";var buy=PandaDEX.order(bid);assert(buy&&buy.price.eq(2));
 var p=PandaBook.plan([sell],true,"3",null,110);assert.strictEqual(p.takes.length,1);assert(p.takes[0].partial&&p.takes[0].remainder.eq(7)&&p.totalUsdt.eq(6));
 function cloneOrder(base, id, amount, created) { var c=JSON.parse(JSON.stringify(base)); c.coinid=id; c.amount=amount; c.created=String(created || 100); return PandaDEX.order(c); }
 function emittedBy(seq, cancelLog) { var out=[], st=PandaTape.newDiff(cancelLog || null, 999999); seq.forEach(function(book, i){PandaTape.ingest(st, book, false, 200, {onFill:function(spent,o,size,price,buy,partial){out.push({spent:spent,size:size.toFixed(),price:price.toFixed(),buy:buy,partial:partial});}}, 1000+i);}); return out; }
@@ -41,15 +42,15 @@ assert.strictEqual(PandaVerify.adjudicate(evidence([{amount:"10",tokenid:"0x00",
 var now=1000000, pend=[
   PandaPending.clean({kind:PandaPending.PLACE,orderId:"new1",buy:false,minima:"111",price:"0.005",submitMs:now,submitBlock:10}),
   PandaPending.clean({kind:PandaPending.CANCEL,orderId:old.orderId,coinid:old.coinid,buy:false,minima:"10",price:"2",submitMs:now,submitBlock:10}),
-  PandaPending.clean({kind:PandaPending.EDIT,orderId:"edit1",coinid:"0xedit_old",buy:true,minima:"5",price:"3",submitMs:now,submitBlock:10})
+  PandaPending.clean({kind:PandaPending.EDIT,orderId:"edit1",coinid:"0xee0018",buy:true,minima:"5",price:"3",submitMs:now,submitBlock:10})
 ];
-var liveNew=cloneOrder(C,"0xnew","111",101); liveNew.orderId="new1";
-var stillOld=cloneOrder(C,"0xedit_old","5",101); stillOld.orderId="edit1";
-var edited=cloneOrder(C,"0xedit_new","5",102); edited.orderId="edit1";
+var liveNew=cloneOrder(C,"0xee001f","111",101); liveNew.orderId="new1";
+var stillOld=cloneOrder(C,"0xee0018","5",101); stillOld.orderId="edit1";
+var edited=cloneOrder(C,"0xee0017","5",102); edited.orderId="edit1";
 var pr=PandaPending.resolve(pend,[liveNew,stillOld],now+1000);
 assert.deepStrictEqual(pr.events.map(function(e){return [e.type,e.row.kind];}),[["live",PandaPending.PLACE],["settled",PandaPending.CANCEL]]);
 assert.strictEqual(pr.rows.length,1);
-assert.strictEqual(pr.refs["0xedit_old"],"edit:edit1");
+assert.strictEqual(pr.refs["0xee0018"],"edit:edit1");
 pr=PandaPending.resolve(pr.rows,[edited],now+2000);
 assert.deepStrictEqual(pr.events.map(function(e){return [e.type,e.row.kind];}),[["settled",PandaPending.EDIT]]);
 assert.strictEqual(pr.rows.length,0);
@@ -60,7 +61,7 @@ var stats=PandaStats.stats24h([{timems:now-PandaStats.D1-1,price:"100",size:"10"
 assert.deepStrictEqual(stats,{last:"3",changePct:"50",high:"3",low:"2",volume:"12"});
 assert.deepStrictEqual(PandaStats.lastFill([{timems:now-5000,price:"2",size:"1"},{timems:now-1000,price:"3",size:"1"}],now),{price:"3",ageMs:1000});
 /* ---- pool + composite ---- */
-var pool={address:"0xpool",opk:"0xpk",oadr:"0xowner",tok:PandaDEX.USDT,kmin:"0",reserveM:"1000",reserveT:"10",coinidM:"0xfa02",coinidT:"0xfa03",tokDecimals:8,covenantScript:"SCRIPT"};
+var pool={address:"0xee0029",opk:"0xee0028",oadr:"0xee0024",tok:PandaDEX.USDT,kmin:"0",reserveM:"1000",reserveT:"10",coinidM:"0xfa02",coinidT:"0xfa03",tokDecimals:8,covenantScript:"SCRIPT"};
 var q=PandaCurve.quoteTForMOut(pool,"10");assert(q.ok&&q.outAmount.gte("10")&&q.inAmount.gt(0));
 var route=PandaPoolRouter.routeExactMinimaOut([pool],"10");assert(route.ok&&route.poolsUsed===1&&route.totalOut.gte("10"));
 var synthetic=PandaSynthetic.sample([pool],true,"0.001",3);assert(synthetic.length>0&&PandaDEX.d(synthetic[0].poolMinima).gt(0));
@@ -71,7 +72,7 @@ var synthetic=PandaSynthetic.sample([pool],true,"0.001",3);assert(synthetic.leng
    approaching two on a constant-product curve — taking Q from reserves (x,y) moves the marginal
    price by ~2Q/x but the average by only ~Q/x. That is precisely the bug this pins: the ladder
    advertised twice the liquidity it could deliver at the price shown beside it. */
-var dPool={address:"0xdp",opk:"0xpk",oadr:"0xo",tok:PandaDEX.USDT,kmin:"0",reserveM:"100000",reserveT:"500",coinidM:"0xdm",coinidT:"0xdt",tokDecimals:8,covenantScript:"S"};
+var dPool={address:"0xee0013",opk:"0xee0028",oadr:"0xee0021",tok:PandaDEX.USDT,kmin:"0",reserveM:"100000",reserveT:"500",coinidM:"0xee0012",coinidT:"0xee0015",tokDecimals:8,covenantScript:"S"};
 var dPx=PandaCurve.aggregatePrice([dPool]), dCap=PandaCurve.totalMinima([dPool]).mul("0.5");
 function solveAvg(boundary){ var lo=PandaDEX.d(0), hi=dCap, i, mid, r, eff, cmp;
   for(i=0;i<40;i++){ mid=lo.add(hi).div(2).toDecimalPlaces(8,Decimal.ROUND_HALF_UP);
@@ -98,7 +99,7 @@ assert(PandaSynthetic.marginalPrice([dPool],true,margQty.mul(2)).gt(nearBoundary
    flatters its own side. Without this, pool rows never merge with the book's grouped levels. */
 assert(PandaSynthetic.bucketPrice("0.0050051",true,"0.0001").eq("0.0051"));
 assert(PandaSynthetic.bucketPrice("0.0050051",false,"0.0001").eq("0.005"));
-var dSmall={address:"0xds",opk:"0xpk",oadr:"0xo",tok:PandaDEX.USDT,kmin:"0",reserveM:"2000",reserveT:"10",coinidM:"0xsm",coinidT:"0xst",tokDecimals:8,covenantScript:"S"};
+var dSmall={address:"0xee0014",opk:"0xee0028",oadr:"0xee0021",tok:PandaDEX.USDT,kmin:"0",reserveM:"2000",reserveT:"10",coinidM:"0xee002c",coinidT:"0xee002f",tokDecimals:8,covenantScript:"S"};
 var sCap=PandaCurve.totalMinima([dSmall]).mul("0.5");
 [["0.0001",true],["0.0001",false],["0.001",true],["0.001",false]].forEach(function(cfg){
   var tickD=PandaDEX.d(cfg[0]), rows=PandaSynthetic.sample([dSmall],cfg[1],cfg[0],6), cum=PandaDEX.d(0), prevPrice=null, j, r;
@@ -124,8 +125,8 @@ var routeCount = 0, realRoute = PandaPoolRouter.route, realExact = PandaPoolRout
 PandaPoolRouter.route = function(a,b,c){ routeCount++; return realRoute(a,b,c); };
 PandaPoolRouter.routeExactMinimaOut = function(a,b){ routeCount++; return realExact(a,b); };
 var costPools = [];
-for (var cp = 0; cp < 6; cp++) costPools.push({address:"0xcp"+cp,opk:"0xk",oadr:"0xo",tok:PandaDEX.USDT,kmin:"0",
-  reserveM:String(2000+cp*500),reserveT:String(10+cp*2),coinidM:"0xcm"+cp,coinidT:"0xct"+cp,tokDecimals:8,covenantScript:"S"});
+for (var cp = 0; cp < 6; cp++) costPools.push({address:"0xee000f"+cp,opk:"0xee001b",oadr:"0xee0021",tok:PandaDEX.USDT,kmin:"0",
+  reserveM:String(2000+cp*500),reserveT:String(10+cp*2),coinidM:"0xee000c"+cp,coinidT:"0xee0010"+cp,tokDecimals:8,covenantScript:"S"});
 PandaSynthetic.sample(costPools,true,"0.0001",10);
 PandaSynthetic.sample(costPools,false,"0.0001",10);
 assert(routeCount > 0);
@@ -154,11 +155,11 @@ assert(wholePlan.orderTakes.length===1&&wholePlan.orderTakes[0].partial===false)
 assert(PandaPool.scriptArg("LET fx=MAX(dx 0)*5/1000").indexOf("*5/1000")>0);
 assert.strictEqual(PandaPool.scriptArg('a"b'),'"a\\"b"');
 var builtCalls=[], builtOutcome=null;
-function comboCmd(command, cb){builtCalls.push(command);if(command.indexOf("balance tokenid:")===0)return cb({status:true,response:[{tokenid:PandaDEX.USDT,coins:1,sendable:"1"}]});if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("coins relevant:true")===0)return cb({status:true,response:[{coinid:"0xfa01",tokenid:PandaDEX.USDT,tokenamount:"1",amount:"1",address:"0xfb01"}]});if(command.indexOf("newscript")===0)return cb({status:true});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xcombo"}});cb({status:true});}
-PandaTxn.fillComposite(comboCmd,{address:"0xme"},combo,true,function(err,tx){builtOutcome={err:err,tx:tx};});
+function comboCmd(command, cb){builtCalls.push(command);if(command.indexOf("balance tokenid:")===0)return cb({status:true,response:[{tokenid:PandaDEX.USDT,coins:1,sendable:"1"}]});if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("coins relevant:true")===0)return cb({status:true,response:[{coinid:"0xfa01",tokenid:PandaDEX.USDT,tokenamount:"1",amount:"1",address:"0xfb01"}]});if(command.indexOf("newscript")===0)return cb({status:true});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xee000d"}});cb({status:true});}
+PandaTxn.fillComposite(comboCmd,{address:"0xee001c"},combo,true,function(err,tx){builtOutcome={err:err,tx:tx};});
 assert.strictEqual(builtOutcome&&builtOutcome.err,null,"composite build: "+JSON.stringify(builtOutcome));
 var comboCreate=builtCalls.filter(function(c){return c.indexOf("txncreate id:combo_")===0;})[0], comboId=comboCreate.split("id:")[1];
-assert.deepStrictEqual(builtOutcome,{err:null,tx:"0xcombo"});assert(builtCalls.some(function(c){return c==="txninput id:"+comboId+" coinid:0xfa02";}));assert(builtCalls.some(function(c){return c.indexOf("address:0xpool")>0&&c.indexOf("tokenid:"+PandaDEX.USDT)>0;}));
+assert.deepStrictEqual(builtOutcome,{err:null,tx:"0xee000d"});assert(builtCalls.some(function(c){return c==="txninput id:"+comboId+" coinid:0xfa02";}));assert(builtCalls.some(function(c){return c.indexOf("address:0xee0029")>0&&c.indexOf("tokenid:"+PandaDEX.USDT)>0;}));
 /* Pool reserve addresses must NOT be tracked as wallet-owned. With trackall:true every stranger's
    liquidity reads as the user's own coins — the ownership pollution native lists as a fixed
    critical issue, and what this code did before it was restored. */
@@ -167,7 +168,7 @@ assert(!builtCalls.some(function(c){return c.indexOf("trackall:true")>0;}));
 /* Transaction layout keeps the covenant's index rules: pool reserve PAIRS first, then whole order
    coins, then funding — the partial's remainder is the only covenant output and comes last. */
 var layoutPrep=PandaTxn.prepareComposite(combo,true);
-var layout=PandaTxn.buildCompositeSteps("tx",{address:"0xme"},combo,layoutPrep,true,[{coinid:"0xfa01"}],"1");
+var layout=PandaTxn.buildCompositeSteps("tx",{address:"0xee001c"},combo,layoutPrep,true,[{coinid:"0xfa01"}],"1");
 var layoutInputs=layout.filter(function(c){return c.indexOf("txninput")===0;});
 assert.strictEqual(layoutInputs[0],"txninput id:tx coinid:0xfa02");
 assert.strictEqual(layoutInputs[1],"txninput id:tx coinid:0xfa03");
@@ -175,11 +176,11 @@ assert.strictEqual(layoutInputs[layoutInputs.length-1],"txninput id:tx coinid:0x
 /* Regression: Minima's txncheck says `validamounts`, never `amounts`. A valid owner-cancel
    must post, and must sign specifically with the owner key embedded in port 0. */
 var calls=[], outcome=null;
-function fakeCmd(command, cb){calls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xposted"}});cb({status:true});}
+function fakeCmd(command, cb){calls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xee002a"}});cb({status:true});}
 PandaTxn.cancel(fakeCmd,sell,function(err,tx){outcome={err:err,tx:tx};});
-assert.deepStrictEqual(outcome,{err:null,tx:"0xposted"});assert(calls.some(function(c){return c.indexOf("txnsign")===0&&c.indexOf("publickey:0xabc")>0;}));
+assert.deepStrictEqual(outcome,{err:null,tx:"0xee002a"});assert(calls.some(function(c){return c.indexOf("txnsign")===0&&c.indexOf("publickey:0xee0006")>0;}));
 calls=[];outcome=null;PandaTxn.relock(fakeCmd,sell,"30",function(err,tx){outcome={err:err,tx:tx};});
-assert.deepStrictEqual(outcome,{err:null,tx:"0xposted"});assert(calls.some(function(c){return c.indexOf("txnoutput")===0&&c.indexOf("address:"+PandaDEX.ADDR)>0&&c.indexOf("storestate:true")>0;}));assert(calls.some(function(c){return c==="txnstate id:"+calls[0].split("id:")[1]+" port:2 value:30";}));
+assert.deepStrictEqual(outcome,{err:null,tx:"0xee002a"});assert(calls.some(function(c){return c.indexOf("txnoutput")===0&&c.indexOf("address:"+PandaDEX.ADDR)>0&&c.indexOf("storestate:true")>0;}));assert(calls.some(function(c){return c==="txnstate id:"+calls[0].split("id:")[1]+" port:2 value:30";}));
 assert(PandaTxn.newWantForPrice(sell,"3").eq(30));
 assert(PandaTxn.newWantForPrice(buy,"4").eq(5));
 /* Covenant timing constants must stay in a workable order (native OrderValidationTest pins the
@@ -227,7 +228,7 @@ assert.strictEqual(PandaSignLock.queued(),0);
    creates an order, because `send` signs internally too. */
 calls=[];var gatedDuring=null;
 PandaSignLock.gate("holder",function(release){
-  PandaTxn.create(fakeCmd,{publickey:"0xabc",address:"0x"+"a".repeat(64)},{buy:false,minima:"10",price:"2",gtc:true,minRem:"1",orderId:"0x55"},function(){});
+  PandaTxn.create(fakeCmd,{publickey:"0xee0006",address:"0x"+"a".repeat(64)},{buy:false,minima:"10",price:"2",gtc:true,minRem:"1",orderId:"0x55"},function(){});
   gatedDuring=calls.some(function(c){return c.indexOf("send ")===0;});
   release.free();
 });
@@ -236,7 +237,7 @@ assert(calls.some(function(c){return c.indexOf("send ")===0&&c.indexOf("address:
 /* Native 0.4.15 uses the chain's serialized TxPoW limit at txnpost; txnexport is different bytes. */
 calls=[];outcome=null;
 PandaTxn.cancel(fakeCmd,sell,function(err,tx){outcome={err:err,tx:tx};});
-assert.deepStrictEqual(outcome,{err:null,tx:"0xposted"});
+assert.deepStrictEqual(outcome,{err:null,tx:"0xee002a"});
 assert(!calls.some(function(c){return c.indexOf("txnexport")===0;}));
 calls=[];outcome=null;
 PandaTxn.cancel(function(c,cb){calls.push(c);if(c.indexOf("txnpost")===0)return cb({status:false,error:"TxPoW size too large.. 70000/65536"});fakeCmd(c,cb);},sell,function(err){outcome=err;});
@@ -256,31 +257,31 @@ assert.strictEqual(PandaSignLock.busy(),false);
 
 /* Keys materialise asynchronously; signing with an owner key this wallet does not hold must be
    refused before it reaches the node, not surfaced as a raw error afterwards. */
-PandaTxn.holdsKey=function(k){return k==="0xabc";};
+PandaTxn.holdsKey=function(k){return k==="0xee0006";};
 calls=[];outcome=null;
-var foreign=cloneOrder(C,"0xforeign","10",100); foreign.ownerPk="0xsomeoneelse";
+var foreign=cloneOrder(C,"0xee001a","10",100); foreign.ownerPk="0xee002e";
 PandaTxn.cancel(fakeCmd,foreign,function(err){outcome=err;});
 assert(outcome&&outcome.indexOf("does not hold the key")>0,"a foreign owner key must be refused up front");
 assert.strictEqual(calls.length,0,"nothing should reach the node when the key is not held");
 calls=[];outcome=null;PandaTxn.cancel(fakeCmd,sell,function(err,tx){outcome={err:err,tx:tx};});
-assert.deepStrictEqual(outcome,{err:null,tx:"0xposted"},"a key we DO hold must still sign");
-PandaTxn.holdsKey=null;
+assert.deepStrictEqual(outcome,{err:null,tx:"0xee002a"},"a key we DO hold must still sign");
+PandaTxn.holdsKey=function(){return true;};
 /* SelfSplit — exact command shape (native SelfSplitTest). MINIMA omits tokenid entirely; a token
    split puts tokenid before split. And it signs, so it must sit behind the gate. */
-assert.strictEqual(PandaSplit.command("0xme","0x00","5"),"send address:0xme amount:5 split:10");
-assert.strictEqual(PandaSplit.command("0xme",PandaDEX.USDT,"2.5"),"send address:0xme amount:2.5 tokenid:"+PandaDEX.USDT+" split:10");
+assert.strictEqual(PandaSplit.command("0xee001c","0x00","5"),"send address:0xee001c amount:5 split:10");
+assert.strictEqual(PandaSplit.command("0xee001c",PandaDEX.USDT,"2.5"),"send address:0xee001c amount:2.5 tokenid:"+PandaDEX.USDT+" split:10");
 calls=[];var splitDuring=null;
 PandaSignLock.gate("holder",function(release){
-  PandaSplit.run(fakeCmd,"0xme","0x00","5",function(){});
+  PandaSplit.run(fakeCmd,"0xee001c","0x00","5",function(){});
   splitDuring=calls.some(function(c){return c.indexOf("send ")===0;});
   release.free();
 });
 assert.strictEqual(splitDuring,false);
-assert(calls.some(function(c){return c.indexOf("send address:0xme")===0&&c.indexOf("split:10")>0;}));
+assert(calls.some(function(c){return c.indexOf("send address:0xee001c")===0&&c.indexOf("split:10")>0;}));
 
 /* Trade export — money in / money out from confirmed rows only, cut never rounded up. */
-var xrows=[{timems:1,block:10,price:"2",size:"3",buy:true,maker:false,spentcoin:"0xa",txpowid:"0xdead"},
-           {timems:2,block:11,price:"4",size:"1",buy:false,maker:true,spentcoin:"0xb"}];
+var xrows=[{timems:1,block:10,price:"2",size:"3",buy:true,maker:false,spentcoin:"0xee0005",txpowid:"0xdead"},
+           {timems:2,block:11,price:"4",size:"1",buy:false,maker:true,spentcoin:"0xee0007"}];
 var xt=PandaExport.totals(xrows);
 assert.strictEqual(xt.fills,2);
 assert(xt.minimaBought.eq(3)&&xt.minimaSold.eq(1));
@@ -298,7 +299,7 @@ assert(xcsv[2].indexOf("SELL")>0&&xcsv[2].indexOf("MAKER")>0);
 var xver=PandaExport.verificationCsv(xrows).split("\n");
 assert(xver[2].indexOf(PandaExport.UNVERIFIED)>0);
 /* A field containing a comma must not break the column count. */
-assert(PandaExport.verificationCsv([{timems:1,price:"1",size:"1",verification_note:"a,b",txpowid:"0x1"}]).indexOf('"a,b"')>0);
+assert(PandaExport.verificationCsv([{timems:1,price:"1",size:"1",verification_note:"a,b",txpowid:"0xee0001"}]).indexOf('"a,b"')>0);
 assert.strictEqual(PandaExport.files(xrows,{}).length,4);
 /* The running position closes where the totals say it should. */
 var xrec=PandaExport.reconciliationCsv(xrows).trim().split("\n");
@@ -311,14 +312,14 @@ assert.strictEqual(PandaExplorer.classify(0,"").status,PandaExplorer.ERROR);
 assert.strictEqual(PandaExplorer.classify(404,"").status,PandaExplorer.NOT_FOUND);
 assert.strictEqual(PandaExplorer.classify(503,"").status,"EXPLORER_HTTP_503");
 assert.strictEqual(PandaExplorer.classify(200,"not json").status,PandaExplorer.ERROR);
-assert.strictEqual(PandaExplorer.classify(200,'[{"result":{"data":{"json":{"txpowid":"0x1"}}}}]').status,PandaExplorer.OK);
+assert.strictEqual(PandaExplorer.classify(200,'[{"result":{"data":{"json":{"txpowid":"0xee0001"}}}}]').status,PandaExplorer.OK);
 assert.strictEqual(PandaExplorer.classify(200,'[{"result":{"data":{"json":null}}}]').status,PandaExplorer.NOT_FOUND);
 assert.strictEqual(PandaExplorer.classify(200,'[{"error":{"message":"boom"}}]').status,PandaExplorer.ERROR);
 /* A fill with no recorded txpowid never reaches the network at all. */
 var reached=false; PandaExplorer.request=function(){reached=true;};
 PandaExplorer.verify("",function(r){assert.strictEqual(r.status,PandaExplorer.LOCAL_ONLY);});
 assert.strictEqual(reached,false);
-assert(PandaExplorer.url("0xabc").indexOf(PandaExplorer.BASE)===0);
+assert(PandaExplorer.url("0xee0006").indexOf(PandaExplorer.BASE)===0);
 /* ---- covenant partial-fill arithmetic (native PriceMathTest) ----
    This is the most fund-critical logic in the app: it is what the covenant checks on-chain, and
    getting it wrong either strands a maker's funds or lets a taker underpay. Honest partials must
@@ -374,22 +375,22 @@ function ask(id, minima, price, created, minRem) {
   c.state["2"]=PandaDEX.d(minima).mul(price).toFixed(); c.state["4"]=id; c.state["8"]=minRem||"0";
   return PandaDEX.order(c);
 }
-var cheap=ask("0xc","10","1",100), dear=ask("0xd","10","3",100);
+var cheap=ask("0xee000b","10","1",100), dear=ask("0xee0011","10","3",100);
 var sp=PandaBook.plan([dear,cheap],true,"15",null,110);
 assert.strictEqual(sp.takes.length,2);
-assert.strictEqual(sp.takes[0].order.coinid,"0xc");        /* best price first */
+assert.strictEqual(sp.takes[0].order.coinid,"0xee000b");        /* best price first */
 assert.strictEqual(sp.takes[0].partial,false);             /* fill the best one whole... */
 assert.strictEqual(sp.takes[1].partial,true);              /* ...and only the last is partial */
 /* A limit price excludes anything worse. */
 assert.strictEqual(PandaBook.plan([dear,cheap],true,"15","1",110).takes.length,1);
 /* An order too close to expiry is skipped: it could lapse while the sweep is still mining. */
-assert.strictEqual(PandaBook.plan([ask("0xe","10","1",100)],true,"5",null,100+PandaDEX.EXPIRY-10).takes.length,0);
+assert.strictEqual(PandaBook.plan([ask("0xee0016","10","1",100)],true,"5",null,100+PandaDEX.EXPIRY-10).takes.length,0);
 /* The maker's dust floor shrinks the take rather than leaving an unsellable stub — and the
    remainder it reports must be the one it actually leaves behind. Regression: the clamp used to
    adjust the take without recomputing the remainder, so the sweep wrote a covenant output below
    the maker's floor with amounts that did not balance. The covenant rejected it every time,
    silently, after the taker had already paid for the proof-of-work. */
-var flooredOrder=ask("0xf","10","1",100,"4"), floored=PandaBook.plan([flooredOrder],true,"9",null,110);
+var flooredOrder=ask("0xee0019","10","1",100,"4"), floored=PandaBook.plan([flooredOrder],true,"9",null,110);
 assert.strictEqual(floored.takes.length,1);
 assert(floored.takes[0].remainder.gte(4));
 assert(floored.takes[0].lockedTake.add(floored.takes[0].remainder).eq(flooredOrder.locked));
@@ -398,7 +399,7 @@ assert(PandaDEX.covenantAccepts(flooredOrder.locked, flooredOrder.wantAmt, floor
   flooredOrder.minRem, floored.takes[0].pay, PandaDEX.newWantFor(flooredOrder.wantAmt, flooredOrder.locked, floored.takes[0].remainder)));
 /* Every partial the planner emits must satisfy the covenant, clamped or not. */
 [["10","1","0","7"],["10","1","4","9"],["100","0.0575","30","55"]].forEach(function(v){
-  var o=ask("0x9"+v[3],v[0],v[1],100,v[2]), pl=PandaBook.plan([o],true,v[3],null,110), t=pl.takes[0];
+  var o=ask("0xee0004"+("0"+v[3]).slice(-2),v[0],v[1],100,v[2]), pl=PandaBook.plan([o],true,v[3],null,110), t=pl.takes[0];
   if(!t||!t.partial) return;
   assert(t.lockedTake.add(t.remainder).eq(o.locked));
   assert(PandaDEX.covenantAccepts(o.locked,o.wantAmt,t.remainder,o.minRem,t.pay,PandaDEX.newWantFor(o.wantAmt,o.locked,t.remainder)));
@@ -408,14 +409,14 @@ var many=PandaBook.plan([ask("0x1a","10","1",100),ask("0x1b","10","1",100),ask("
 assert.strictEqual(many.takes.filter(function(t){return t.partial;}).length,1);
 assert.strictEqual(many.takes[many.takes.length-1].partial,true);
 /* A sweep never exceeds the covenant's per-transaction order cap. */
-var wide=[],wi; for(wi=0;wi<12;wi++) wide.push(ask("0x2"+wi,"10","1",100));
+var wide=[],wi; for(wi=0;wi<12;wi++) wide.push(ask("0xee0002"+("0"+wi).slice(-2),"10","1",100));
 assert(PandaBook.plan(wide,true,"120",null,110).takes.length<=PandaDEX.MAX_ORDERS);
 /* ---- fixes from the 0.3.5 review ---- */
 /* Both LEGS are capped, not just the locked one: the covenant compares by cross-multiplication,
    so an unbounded want side can overflow just as easily. */
 var legCalls=[];
 function legCmd(c,cb){legCalls.push(c);cb({status:true,response:{random:"0x55"}});}
-PandaTxn.create(legCmd,{publickey:"0xabc",address:"0x"+"a".repeat(64)},{buy:false,minima:"1000000000",price:"2",orderId:"0x1"},function(err){assert(err&&err.indexOf("permitted range")>0);});
+PandaTxn.create(legCmd,{publickey:"0xee0006",address:"0x"+"a".repeat(64)},{buy:false,minima:"1000000000",price:"2",orderId:"0xee0001"},function(err){assert(err&&err.indexOf("permitted range")>0);});
 assert(!legCalls.some(function(c){return c.indexOf("send ")===0;}));
 /* A crowded address is counted first and its unbounded coin list is never requested. */
 var fundingCommands=[];
@@ -435,10 +436,10 @@ assert.strictEqual(PandaDEX.portPrice("1","0").toFixed(),"0");
 calls=[];PandaTxn.relock(fakeCmd,sell,"30",function(){});
 assert(calls.some(function(c){return c==="txnstate id:"+calls[0].split("id:")[1]+" port:6 value:3";}));
 /* The smallest pool is the one contributing least MINIMA — a different leg on each side. */
-var allocBig={pool:{address:"0xbig"},quote:{inAmount:PandaDEX.d(100),outAmount:PandaDEX.d(1)}};
-var allocSmall={pool:{address:"0xsmall"},quote:{inAmount:PandaDEX.d(1),outAmount:PandaDEX.d(100)}};
-assert.strictEqual(PandaComposite.smallestPool({allocs:[allocBig,allocSmall]},true).address,"0xbig");
-assert.strictEqual(PandaComposite.smallestPool({allocs:[allocBig,allocSmall]},false).address,"0xsmall");
+var allocBig={pool:{address:"0xee000a"},quote:{inAmount:PandaDEX.d(100),outAmount:PandaDEX.d(1)}};
+var allocSmall={pool:{address:"0xee002d"},quote:{inAmount:PandaDEX.d(1),outAmount:PandaDEX.d(100)}};
+assert.strictEqual(PandaComposite.smallestPool({allocs:[allocBig,allocSmall]},true).address,"0xee000a");
+assert.strictEqual(PandaComposite.smallestPool({allocs:[allocBig,allocSmall]},false).address,"0xee002d");
 /* Against a buy order the reported MINIMA is what the taker actually delivers. */
 function bidOrder(id,usdt,price,minRem){var c=JSON.parse(JSON.stringify(C));c.coinid=id;c.tokenid=PandaDEX.USDT;c.tokenamount=usdt;c.amount=usdt;c.created="100";
   c.state["2"]=PandaDEX.d(usdt).div(price).toFixed();c.state["3"]="0x00";c.state["5"]="0";c.state["4"]=id;c.state["8"]=minRem||"0";return PandaDEX.order(c);}
@@ -567,7 +568,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
     if (cmdstr.indexOf("address:" + ADDR) > 0) {                       /* the order book */
       return [{ coinid:"0xba01", tokenid:"0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90",
                 tokenamount:"20", amount:"20", created:"990",
-                state:{ "0":"0xstranger", "1":"0x"+"c".repeat(64), "2":"10", "3":"0x00", "4":"0xba01", "5":"0", "7":"0", "8":"0" } }];
+                state:{ "0":"0xee0030", "1":"0x"+"c".repeat(64), "2":"10", "3":"0x00", "4":"0xba01", "5":"0", "7":"0", "8":"0" } }];
     }
     if (cmdstr.indexOf("relevant:true") === 0 || cmdstr.indexOf("coins relevant:true") === 0) {
       return [{ coinid:"0xfa01", tokenid:"0x00", amount:"100000", address:MYADDR }];  /* wallet funding */
@@ -588,17 +589,17 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
       cmd: function (c, cb) {
         sent.push(c);
         var r = { status:true };
-        if (c.indexOf("runscript") === 0) r = { status:true, response:{ parseok:true, script:{ address:ADDR } } };
-        else if (c.indexOf("getaddress") === 0) r = { status:true, response:{ address:MYADDR, publickey:"0xmypk", miniaddress:"MxABC" } };
-        else if (c.indexOf("keys action:list") === 0) r = { status:true, response:[{ publickey:"0xmypk" }] };
+        if (c.indexOf("runscript") === 0) r = { status:true, response:{ parseok:true, script:{ address:c.indexOf("RETURN SIGNEDBY(")>=0?MYADDR:ADDR } } };
+        else if (c.indexOf("getaddress") === 0) r = { status:true, response:{ address:MYADDR, publickey:"0xee001e", miniaddress:"MxABC" } };
+        else if (c.indexOf("keys action:list") === 0) r = { status:true, response:[{ publickey:"0xee001e" }] };
         else if (c.indexOf("scripts") === 0) r = { status:true, response:[{ address:MYADDR }] };
         else if (c.indexOf("balance tokenid:") === 0) r={status:true,response:[{tokenid:c.split("tokenid:")[1].split(" ")[0],coins:1,sendable:"100000"}]};
         else if (c.indexOf("block") === 0) r = { status:true, response:{ block:1000 } };
         else if (c.indexOf("coins") === 0) r = { status:true, response:coinsFor(c) };
-        else if (c.indexOf("random") === 0) r = { status:true, response:{ random:"0xnewid" } };
+        else if (c.indexOf("random") === 0) r = { status:true, response:{ random:"0xee0020" } };
         else if (c.indexOf("txnexport") === 0) r = { status:true, response:{ data:"0x00" } };
         else if (c.indexOf("txncheck") === 0) r = { status:true, response:{ valid:{ scripts:true, basic:true, mmrproofs:true }, validamounts:true, validtransaction:true, allsignaturesvalid:true } };
-        else if (c.indexOf("txnpost") === 0) r = { pending:true, response:{ txpowid:"0xposted" } };
+        else if (c.indexOf("txnpost") === 0) r = { pending:true, response:{ txpowid:"0xee002a" } };
         if (cb) cb(r);
       }
     }
@@ -627,7 +628,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   var meta = JSON.parse(vmmod.runInContext("JSON.stringify(PDService.fillMeta||null)", sandbox));
   assert(meta && meta.spentcoin === "0xba01", "the fill was not recorded for reconciliation");
   assert.strictEqual(meta.sourceKind, "BOOK");
-  assert.strictEqual(meta.txpowid, "0xposted");
+  assert.strictEqual(meta.txpowid, "0xee002a");
   vmmod.runInContext("PDService.busy=true; PDService.setStage('Signing transaction'); PDService.stageAtMs=Date.now()-60000",sandbox);
   assert.strictEqual(vmmod.runInContext("PDService.stageNow()",sandbox),"Signing transaction");
   vmmod.runInContext("for(var logTest=0;logTest<65;logTest++)PDService.setStage('Fixture '+logTest)",sandbox);
@@ -653,21 +654,21 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
         sent.push(c);
         var r={status:true};
         if(c.indexOf("runscript")===0)
-          r={status:true,response:{parseok:true,script:{address:(c.indexOf("PREVSTATE(0)")>0?ADDR:POOL)}}};
-        else if(c.indexOf("getaddress")===0) r={status:true,response:{address:MYADDR,publickey:"0xmypk",miniaddress:"MxABC"}};
-        else if(c.indexOf("keys action:list")===0) r={status:true,response:[{publickey:"0xmypk"}]};
+          r={status:true,response:{parseok:true,script:{address:(c.indexOf("RETURN SIGNEDBY(")>=0?MYADDR:(c.indexOf("PREVSTATE(0)")>0?ADDR:POOL))}}};
+        else if(c.indexOf("getaddress")===0) r={status:true,response:{address:MYADDR,publickey:"0xee001e",miniaddress:"MxABC"}};
+        else if(c.indexOf("keys action:list")===0) r={status:true,response:[{publickey:"0xee001e"}]};
         else if(c.indexOf("scripts")===0) r={status:true,response:[{address:MYADDR}]};
         else if(c.indexOf("balance tokenid:")===0) r={status:true,response:[{tokenid:c.split("tokenid:")[1].split(" ")[0],coins:1,sendable:"100000"}]};
         else if(c.indexOf("block")===0) r={status:true,response:{block:1000}};
-        else if(c.indexOf("random")===0) r={status:true,response:{random:"0xnewid"}};
+        else if(c.indexOf("random")===0) r={status:true,response:{random:"0xee0020"}};
         else if(c.indexOf("txnexport")===0) r={status:true,response:{data:"0x00"}};
         else if(c.indexOf("txncheck")===0) r={status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}};
-        else if(c.indexOf("txnpost")===0) r={pending:true,response:{txpowid:"0xcomposite"}};
+        else if(c.indexOf("txnpost")===0) r={pending:true,response:{txpowid:"0xee000e"}};
         else if(c.indexOf("coins")===0){
           var rows=[];
           if(c.indexOf("address:"+SENT)>0)                                   /* the pool beacon */
-            rows=[{coinid:"0xbeacon",tokenid:"0x00",amount:"0.000000001",created:"900",
-                   state:{"2":USDT,"3":"0xowneraddr","4":"0xownerpk","5":"0"}}];
+            rows=[{coinid:"0xee0008",tokenid:"0x00",amount:"0.000000001",created:"900",
+                   state:{"2":USDT,"3":"0xee0025","4":"0xee0026","5":"0"}}];
           else if(c.indexOf("address:"+POOL)>0)                              /* the reserves */
             rows=[{coinid:"0xfa04",tokenid:"0x00",amount:"2000",created:"950"},
                   {coinid:"0xfa05",tokenid:USDT,tokenamount:"10",amount:"10",created:"950"}];
@@ -705,7 +706,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   assert.strictEqual(vmmod.runInContext("PDService.busy", sandbox), false);
   var meta = JSON.parse(vmmod.runInContext("JSON.stringify(PDService.fillMeta||null)", sandbox));
   assert(meta && meta.sourceKind === "POOL", "a pool-only fill should record source POOL, got " + (meta && meta.sourceKind));
-  assert.strictEqual(meta.txpowid, "0xcomposite");
+  assert.strictEqual(meta.txpowid, "0xee000e");
 })();
 /* ---- THE PHANTOM LADDER (reported from mainnet) ----
    Three 1000-MINIMA ask rungs are cancelled, refunding exactly 1000 MINIMA each to the wallet's
@@ -721,24 +722,24 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
                                wantAmt:PandaDEX.d(1000), wantTok:"0x00", created:100 }; }
   for (k = 0; k < 3; k++) {
     items.push({ coinid:"0xac01" + k, order:ask("0xac01" + k), since:200 });
-    items.push({ coinid:"0xbid" + k, order:bidO("0xbid" + k), since:200 });
-    rows.push({ coinid:"0xrefund" + k, tokenid:"0x00", amount:"1000", created:205 });   /* the ask refunds */
+    items.push({ coinid:"0xee0009" + k, order:bidO("0xee0009" + k), since:200 });
+    rows.push({ coinid:"0xee002b" + k, tokenid:"0x00", amount:"1000", created:205 });   /* the ask refunds */
   }
   var byAddr = {}; byAddr[MYADDR] = rows;
   var verdicts = PandaVerify.adjudicateBatch(byAddr, items, 206);
   for (k = 0; k < 3; k++) {
     assert.strictEqual(verdicts["0xac01" + k], PandaVerify.CANCELLED, "a cancelled ask must read as cancelled");
-    assert.strictEqual(verdicts["0xbid" + k], PandaVerify.UNKNOWN,
+    assert.strictEqual(verdicts["0xee0009" + k], PandaVerify.UNKNOWN,
       "a bid rung claimed another order's refund as its own payment — the phantom bug is back");
   }
   /* One genuine payment proves exactly one fill, and cannot be reused by a second order. */
   var two = [{coinid:"0xb1", order:bidO("0xb1"), since:200}, {coinid:"0xb2", order:bidO("0xb2"), since:200}];
-  var one = {}; one[MYADDR] = [{ coinid:"0xpay", tokenid:"0x00", amount:"1000", created:205 }];
+  var one = {}; one[MYADDR] = [{ coinid:"0xee0027", tokenid:"0x00", amount:"1000", created:205 }];
   var v2 = PandaVerify.adjudicateBatch(one, two, 206);
   assert.strictEqual([v2["0xb1"], v2["0xb2"]].filter(function (x) { return x === PandaVerify.FILLED; }).length, 1,
     "one payment coin proved more than one fill");
   /* Evidence older than the last block the order was alive cannot explain its disappearance. */
-  var stale = {}; stale[MYADDR] = [{ coinid:"0xold", tokenid:"0x00", amount:"1000", created:150 }];
+  var stale = {}; stale[MYADDR] = [{ coinid:"0xee0022", tokenid:"0x00", amount:"1000", created:150 }];
   assert.strictEqual(PandaVerify.adjudicateBatch(stale, [{coinid:"0xb3", order:bidO("0xb3"), since:200}], 206)["0xb3"],
     PandaVerify.UNKNOWN, "a coin that predates the vanish was accepted as proof");
   /* An unreadable reply is never "no evidence" — it must not become a verdict either way. */
@@ -753,8 +754,8 @@ assert.strictEqual(PandaVerify.coinPresent(null), null);                        
 assert.strictEqual(PandaVerify.coinPresent({status:false}), null);                          /* failure = unknown */
 assert.strictEqual(PandaVerify.coinPresent({status:true,response:"nonsense"}), null);       /* unparseable = unknown */
 assert.strictEqual(PandaVerify.coinPresent({status:true,response:[]}), false);              /* genuinely gone */
-assert.strictEqual(PandaVerify.coinPresent({status:true,response:[{coinid:"0x1"}]}), true);
-assert.strictEqual(PandaVerify.coinPresent({status:true,response:{coinid:"0x1"}}), true);
+assert.strictEqual(PandaVerify.coinPresent({status:true,response:[{coinid:"0xee0001"}]}), true);
+assert.strictEqual(PandaVerify.coinPresent({status:true,response:{coinid:"0xee0001"}}), true);
 /* An unknown reply must NEVER be treated as spent — that is how a trade gets recorded that the
    chain never accepted. */
 assert.notStrictEqual(PandaVerify.coinPresent({status:false}), false);
@@ -801,7 +802,7 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
         off = Number((cmd.match(/offset:(\d+)/) || [])[1] || 0);
     if (max > 4) return cb({ status:true, response:{} });           /* over-cap: no txpows array */
     if (off === 0) return cb({ status:true, response:{ txpows:[
-      { txpowid:"0x7101", body:{ txn:{ inputs:[{coinid:"0xother"}], outputs:[] } } },
+      { txpowid:"0x7101", body:{ txn:{ inputs:[{coinid:"0xee0023"}], outputs:[] } } },
       { txpowid:"0x7102", body:{ txn:{ inputs:[{coinid:"0xac01"}],
         outputs:[{address:MY, tokenid:PandaDEX.USDT, tokenamount:"5"}] } } }
     ] } });
@@ -820,8 +821,8 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   var budget = [];
   PandaHistory.findSpends(function (cmd, cb) {
     budget.push(cmd);
-    cb({ status:true, response:{ txpows:[{ txpowid:"0xz", body:{ txn:{ inputs:[{coinid:"0xnope"}], outputs:[] } } }] } });
-  }, ["0xmissing"], function (found) { assert.deepStrictEqual(found, {}); });
+    cb({ status:true, response:{ txpows:[{ txpowid:"0xee0033", body:{ txn:{ inputs:[{coinid:"0xnope"}], outputs:[] } } }] } });
+  }, ["0xee001d"], function (found) { assert.deepStrictEqual(found, {}); });
   assert(budget.length <= PandaHistory.MAX_FETCHES + 1, "history paging ran past its call budget");
 })();
 /* ---- ASSETS balance breakdown. Ported from native BalanceDisplayTest, which exists because the
@@ -908,8 +909,8 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
     "single-digit month and day must be zero-padded");
 
   rows = [
-    {timems:at - 5000, price:"2.5", size:"4", buy:true,  coinid:"0xa", txpowid:"0xt1", verified:"CHAIN"},
-    {timems:at - 3000, price:"2.0", size:"1", buy:false, coinid:"0xb", txpowid:"0xt2", verified:"CHAIN"}
+    {timems:at - 5000, price:"2.5", size:"4", buy:true,  coinid:"0xee0005", txpowid:"0xee0031", verified:"CHAIN"},
+    {timems:at - 3000, price:"2.0", size:"1", buy:false, coinid:"0xee0007", txpowid:"0xee0032", verified:"CHAIN"}
   ];
   files = PandaExport.files(rows, {version:"0.4.5", address:"MxTEST", block:1234});
   assert.strictEqual(files.length, 4);
