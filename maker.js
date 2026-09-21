@@ -141,6 +141,32 @@ var PandaMaker = PandaMaker || {};
     max = Number(b.maxActions || 0);
     return max > 0 && actions.length > max ? actions.slice(0, max) : actions;
   };
+  /* ---- MakerPosition (native MakerPosition) ----------------------------------------------
+     "Has this rung been partly eaten?" compared the order's MINIMA against the size we asked for.
+     That holds for a SELL, where the MINIMA is what the order locks. For a BUY the MINIMA is the
+     WANT side, and repricing changes it with no fill at all — so every repriced bid read as
+     part-filled and the engine then refused to touch it again, forever.
+
+     The funded LOCKED amount is the honest baseline: it is fixed at creation and the covenant only
+     ever reduces it, and only by a fill. This is a balance comparison, not proof of a particular
+     fill transaction — which is why an unknown baseline preserves rather than adjusts. */
+  M.baseline = function (record, order) {
+    var locked;
+    if (!record || !order) return null;
+    if (record.locked !== null && record.locked !== undefined && record.locked !== "") {
+      locked = P.d(record.locked);
+      return locked.gt(0) && P.eqTok(order.lockedTok, record.lockedToken) ? locked : null;
+    }
+    /* A legacy record kept only the requested MINIMA size. For a sell that IS the funded amount;
+       a legacy buy cannot recover its original funding once the price has moved. */
+    return order.sell && record.size !== undefined && record.size !== null && P.d(record.size).gt(0)
+      ? P.down(P.d(record.size), P.DP) : null;
+  };
+  M.preserve = function (record, order) {
+    var initial = M.baseline(record, order);
+    return initial === null || P.d(order.locked).cmp(initial) !== 0;
+  };
+
   /* ---- MakerQuoteGuard (native MakerQuoteGuard) -------------------------------------------
      A cycle decides its whole ladder up front and then posts each action through several async
      node round-trips — a random id, a funding scan, txncheck, txnpost. By the time the fourth

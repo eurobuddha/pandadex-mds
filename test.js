@@ -1092,6 +1092,46 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   var sent=[], result;
   PandaTxn.checkPost(function(c,cb){sent.push(c);cb({status:true});},"duplicate",["txncreate id:duplicate","txninput id:duplicate coinid:0x99dd","txninput id:duplicate coinid:0x99DD"],function(e){result=e;});assert(result);assert.strictEqual(sent.length,0);
 })();
+/* ---- MakerPosition (native MakerPosition) ----
+   The reason this exists: a BUY order's MINIMA is the WANT side, and repricing changes it with no
+   fill at all. Comparing that against the requested size marked every repriced bid part-filled,
+   and a part-filled rung is protected from further adjustment \u2014 so a pegged ladder's bids froze
+   after their first reprice. The funded LOCKED amount cannot move except by a fill. */
+(function(){
+  function rec(over){var r={orderId:"0xee0006",size:"10",locked:"10",lockedToken:"0x00",sentBlock:1,lastActionBlock:0},k;
+    for(k in (over||{})) if(over.hasOwnProperty(k)) r[k]=over[k]; return r;}
+  function ord(over){var o={coinid:"0xee0005",sell:true,locked:PandaDEX.d(10),lockedTok:"0x00",minima:PandaDEX.d(10)},k;
+    for(k in (over||{})) if(over.hasOwnProperty(k)) o[k]=over[k]; return o;}
+
+  assert(!PandaMaker.preserve(rec(),ord()),"an untouched sell rung is adjustable");
+  assert(PandaMaker.preserve(rec(),ord({locked:PandaDEX.d(4)})),"a sell that shrank was part-filled");
+
+  /* THE REGRESSION. A bid locks MxUSD; repricing moves its MINIMA want and nothing else. */
+  var bidRec=rec({size:"10",locked:"2",lockedToken:PandaDEX.USDT});
+  var bidFresh=ord({sell:false,locked:PandaDEX.d(2),lockedTok:PandaDEX.USDT,minima:PandaDEX.d(10)});
+  var bidRepriced=ord({sell:false,locked:PandaDEX.d(2),lockedTok:PandaDEX.USDT,minima:PandaDEX.d(8)});
+  assert(!PandaMaker.preserve(bidRec,bidFresh),"a fresh bid is adjustable");
+  assert(!PandaMaker.preserve(bidRec,bidRepriced),
+    "a REPRICED bid is not part-filled \u2014 only its want moved, its funding did not");
+  assert(PandaMaker.preserve(bidRec,ord({sell:false,locked:PandaDEX.d("1.5"),lockedTok:PandaDEX.USDT,minima:PandaDEX.d(8)})),
+    "a bid whose LOCKED MxUSD shrank really was part-filled");
+
+  /* Unknown must preserve \u2014 never adjust a position we cannot prove is untouched. */
+  assert(PandaMaker.preserve(null,ord()),"no record");
+  assert(PandaMaker.preserve(rec(),null),"no order");
+  assert(PandaMaker.preserve(rec({locked:"0"}),ord()),"a zero baseline proves nothing");
+  assert(PandaMaker.preserve(rec({lockedToken:PandaDEX.USDT}),ord()),
+    "a baseline in the wrong asset is not a baseline");
+  assert.strictEqual(PandaMaker.baseline(rec({locked:null}),ord({sell:false})),null,
+    "a LEGACY buy record cannot recover its funding \u2014 unknown, not zero");
+  assert(PandaMaker.preserve(rec({locked:null}),ord({sell:false})),"...so it preserves");
+  assert(PandaMaker.baseline(rec({locked:null}),ord()).eq(10),"a legacy SELL size IS its funding");
+  assert(!PandaMaker.preserve(rec({locked:null}),ord()),"...and an untouched one stays adjustable");
+
+  /* The baseline the service records must be the amount the order actually locked. */
+  assert(PandaTxn.lockedAmount(false,"10","0.2").eq(10),"a sell locks its MINIMA");
+  assert(PandaTxn.lockedAmount(true,"10","0.2").eq(2),"a buy locks size x price in MxUSD");
+})();
 /* ---- MakerQuoteGuard (native MakerQuoteGuard) ----
    A cycle plans its whole ladder, then posts each action through several async node round-trips.
    Checking `armed` once at the top authorises the fourth action with a fact that was true only at

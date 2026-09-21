@@ -3,6 +3,28 @@
 Newest first. Each entry names the native PandaDEX version it reaches parity with, and the specific
 on-chain failure it prevents.
 
+## [0.4.18] — every repriced bid read as part-filled, and froze
+
+Ports native `MakerPosition`. "Has this rung been partly eaten?" compared the order's MINIMA against
+the size we asked for. That holds for a SELL, where the MINIMA is what the order locks. For a BUY the
+MINIMA is the WANT side and repricing changes it with no fill at all — so a pegged ladder's bids read
+as part-filled after their first reprice, and a part-filled rung is protected from further
+adjustment. They stopped tracking the peg and stayed where they were.
+
+Slot records now store the funded LOCKED amount and its token (`PandaTxn.lockedAmount`, shared with
+`T.create`), which is fixed at creation and can only be reduced by a fill. An unknown baseline
+preserves rather than adjusts — existing ladders have no recorded baseline, so their bids stay
+protected until the rungs are recreated, which is the safe direction.
+
+## [0.4.17] — the maker authorised its whole cycle on a fact that was true only at the start
+
+Ports native `MakerQuoteGuard`, `quoteRevision` and the storage-health latch. Each action in a cycle
+posts through several async node round-trips; `armed` was checked once, at the top. `PandaMaker.guard`
+revalidates the captured intent before every action and abandons the rest of the cycle on refusal:
+disarmed, settings rewritten, a rung changed, the peg moved past the reprice threshold, or an ageing
+reference now demanding a wider spread. A CANCEL is always allowed. A failed maker write latches
+quoting off until an explicit user save, and the service no longer takes slot records from the page.
+
 ## [0.4.16] — loading, failed and not-connected were all the same message
 
 Ports native 0.4.17 + 0.4.18. `PandaBalance.message(ready, failed)`; per-asset failure tracking with

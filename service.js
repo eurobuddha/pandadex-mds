@@ -451,7 +451,13 @@ PDService.makerLiveById = function(includeTombs) {
   return out;
 };
 PDService.makerRemember = function(slot, orderId, block) {
-  var c = PDService.maker.cfg; c.slots[slot.id] = {orderId:orderId, size:PandaDEX.plain(slot.sizeMinima), sentBlock:block || 0, lastActionBlock:0}; PDService.saveMaker();
+  var c = PDService.maker.cfg;
+  /* Record what the order LOCKS, not just what we asked for. Repricing changes the want side and
+     leaves this alone, so it is the only baseline a partial fill can be measured against. */
+  c.slots[slot.id] = {orderId:orderId, size:PandaDEX.plain(slot.sizeMinima),
+    locked:PandaDEX.plain(PandaTxn.lockedAmount(!slot.sell, slot.sizeMinima, slot.price)),
+    lockedToken:slot.sell ? "0x00" : PandaDEX.USDT,
+    sentBlock:block || 0, lastActionBlock:0}; PDService.saveMaker();
 };
 PDService.makerForgetByOrderId = function(orderId) {
   var c = PDService.maker.cfg, k;
@@ -560,7 +566,7 @@ PDService.makerOnBook = function() {
       liveBySlot[k] = o;
       if (r.lastActionBlock && PDService.block - Number(r.lastActionBlock) < PDService.MAKER_PATIENCE_BLOCKS) settling[k] = true;
       postedSizes[k] = PDService.dec(r.size);
-      if (PDService.dec(o.minima).lt(postedSizes[k])) partial[o.coinid] = true;
+      if (PandaMaker.preserve(r, o)) partial[o.coinid] = true;
       if (o.gtc && PDService.block - Number(o.created || 0) >= PandaDEX.RENEW_AT) renew[k] = true;
     }
   }

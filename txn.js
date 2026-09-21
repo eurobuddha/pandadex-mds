@@ -115,6 +115,9 @@ var PandaTxn = PandaTxn || {};
   T.buildComposite = function(cmd,identity,plan,prep,takerBuys,coins,fundTotal,done){var id=T.id("combo");T.checkPost(cmd,id,T.buildCompositeSteps(id,identity,plan,prep,takerBuys,coins,fundTotal),done);};
   /* Direct port of Android DexTxn.createOrder: port 8 is denominated in the LOCKED asset,
      so a buy converts the user's MINIMA remainder through its own limit price. */
+  /* What an order actually LOCKS: MINIMA for a sell, MxUSD for a buy (native DexTxn.orderLockedAmount).
+     Unlike the want side, this does not change when the order is repriced. */
+  T.lockedAmount = function(buy,minima,price){return buy?P.up(P.d(minima).mul(P.d(price)),P.DP):P.down(P.d(minima),P.DP);};
   T.create = function(cmd,identity,input,done){var minima=P.down(input.minima,P.DP),price=P.d(input.price),usdt=P.up(minima.mul(price),P.DP),buy=!!input.buy,lock=buy?usdt:minima,want=buy?minima:usdt,minimaRem=P.down(input.minRem||0,P.DP),minRem=buy?P.up(minimaRem.mul(price),P.DP):minimaRem;if(minima.lt(P.MIN_ORDER)||lock.gt(P.MAX_ORDER)||want.gt(P.MAX_ORDER))return done("Order size is outside the permitted range");if(minRem.gt(lock))return done("Minimum remainder is larger than the order itself");/* `send` signs internally, so it needs the gate exactly as much as a txnsign chain does —
      this is the case SignGate.java's javadoc singles out. The `random` call below is read-only
      and deliberately stays outside it. */
