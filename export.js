@@ -55,7 +55,7 @@ var PandaExport = PandaExport || {};
     return out;
   };
 
-  /* Real money in and out. A buy pays mxUSDT and receives MINIMA; a sell is the reverse. */
+  /* Real money in and out. A buy pays MxUSD and receives MINIMA; a sell is the reverse. */
   X.totals = function (rows) {
     var t = {fills:0, minimaBought:P.d(0), minimaSold:P.d(0), usdtPaid:P.d(0), usdtReceived:P.d(0)}, i, r, notional;
     rows = X.clean(rows);
@@ -115,7 +115,7 @@ var PandaExport = PandaExport || {};
     var t = X.totals(rows), c = X.clean(rows), lines = [];
     meta = meta || {};
     lines.push("PandaDEX trade reconciliation");
-    lines.push("market            MINIMA / mxUSDT");
+    lines.push("market            MINIMA / MxUSD");
     if (meta.version) lines.push("app version       " + meta.version);
     if (meta.address) lines.push("wallet address    " + meta.address);
     if (meta.block) lines.push("chain block       " + meta.block);
@@ -127,9 +127,9 @@ var PandaExport = PandaExport || {};
     lines.push("MINIMA sold       " + down(t.minimaSold, 8));
     lines.push("MINIMA net        " + down(t.netMinima, 8));
     lines.push("");
-    lines.push("mxUSDT paid       " + down(t.usdtPaid, 8));
-    lines.push("mxUSDT received   " + down(t.usdtReceived, 8));
-    lines.push("mxUSDT net        " + down(t.netUsdt, 8));
+    lines.push("MxUSD paid       " + down(t.usdtPaid, 8));
+    lines.push("MxUSD received   " + down(t.usdtReceived, 8));
+    lines.push("MxUSD net        " + down(t.netUsdt, 8));
     lines.push("");
     lines.push("Every figure is derived from fills this node observed on-chain. Amounts are cut, never");
     lines.push("rounded up, so nothing here overstates what was received. Rows with no txpowid are");
@@ -148,7 +148,7 @@ var PandaExport = PandaExport || {};
   X.describe = function (rows) {
     var t = X.totals(rows);
     return t.fills + " confirmed personal trade" + (t.fills === 1 ? "" : "s")
-      + " · net " + t.netMinima.toFixed() + " MINIMA · net " + t.netUsdt.toFixed() + " mxUSDT";
+      + " · net " + t.netMinima.toFixed() + " MINIMA · net " + t.netUsdt.toFixed() + " MxUSD";
   };
 
   X.files = function (rows, meta) {

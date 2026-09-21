@@ -266,7 +266,7 @@ PDService.recordFill = function() {
     size:m.size, buy:m.buy, maker:false, orderid:"", txpowid:m.txpowid || "", sourceKind:m.sourceKind || "BOOK",
     sourceCoinids:(m.sourceCoinids || []).join(" "), verificationStatus:"LOCAL_VERIFIED",
     verificationNote:"Source coins spent and expected proceeds observed", verifiedBlock:PDService.block}, function(added) {
-      if (added) PDService.notify("Trade complete: " + (m.buy ? "Bought " : "Sold ") + PandaDEX.plain(m.size) + " MINIMA @ " + PandaDEX.plain(m.price) + " mxUSDT. Funds are confirming.");
+      if (added) PDService.notify("Trade complete: " + (m.buy ? "Bought " : "Sold ") + PandaDEX.plain(m.size) + " MINIMA @ " + PandaDEX.plain(m.price) + " MxUSD. Funds are confirming.");
       PDService.loadTape(function() { PDService.snapshot(); });
     });
 };
@@ -337,7 +337,7 @@ PDService.storeObservedFill = function(spentCoin, order, size, price, takerBuy, 
         verificationNote:(how === "CHAIN_VERIFIED" ? "Read from the included transaction at this order input index" + (proof&&proof.inclusionTimeMs>0?". Time basis: verified inclusion block.":". Time basis: observation on this device.")
           : (partial ? "Partial fill proven by successor order" : "Full fill proven by payout evidence")),
         verifiedBlock:block}, function(added) {
-          if (added) PDService.notify((partial === true && size.lt(order.minima) ? "Order partially filled: " : "Order filled: ") + (order.sell ? "Sold " : "Bought ") + PandaDEX.plain(size) + " MINIMA @ " + PandaDEX.plain(price) + " mxUSDT");
+          if (added) PDService.notify((partial === true && size.lt(order.minima) ? "Order partially filled: " : "Order filled: ") + (order.sell ? "Sold " : "Bought ") + PandaDEX.plain(size) + " MINIMA @ " + PandaDEX.plain(price) + " MxUSD");
           PDService.loadTape(function() { PDService.snapshot(); });
         });
     } else {
@@ -704,7 +704,7 @@ PDService.allSourcesSpent = function(ids, idx, done) {
 PDService.proceedsArrived = function(done) {
   var m = PDService.fillMeta, tok, amount;
   if (!m || !PDService.identity) return done(false);
-  tok = m.buy ? "0x00" : PandaDEX.USDT;                 /* a buy receives MINIMA, a sell mxUSDT */
+  tok = m.buy ? "0x00" : PandaDEX.USDT;                 /* a buy receives MINIMA, a sell MxUSD */
   amount = m.buy ? m.size : PandaDEX.plain(PandaDEX.d(m.size).mul(m.price));
   PDService.cmd("coins simplestate:true address:" + PDService.identity.address + " tokenid:" + tok +
     " coinage:0 depth:" + Math.max(12, PDService.SWEEP_DEADLINE_BLOCKS + 6), function(reply) {

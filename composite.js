@@ -131,7 +131,7 @@ var PandaComposite = {};
   };
   /* Which pool contributes the least MINIMA — and that is a different leg depending on the side:
      buying MINIMA it is the route OUT, selling it is the route IN. Measuring outAmount either way
-     ranked pools by their mxUSDT leg on the sell side and dropped the wrong one, giving a worse
+     ranked pools by their MxUSD leg on the sell side and dropped the wrong one, giving a worse
      fill than necessary whenever a plan had to be shrunk to fit the capacity budget. */
   C.poolMinimaOf = function(alloc, takerBuys) { return P.d(takerBuys ? alloc.quote.outAmount : alloc.quote.inAmount); };
   C.smallestPool = function(route, takerBuys) {

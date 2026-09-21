@@ -104,7 +104,7 @@ var PandaBalance = PandaBalance || {};
       lines.push("MINIMA funding looks thin: " + minimaCoins + " coin" + (minimaCoins === 1 ? "" : "s")
         + " for " + nAsks + " ask rungs.");
     if (nBids > 1 && usdtCoins > 0 && usdtCoins < nBids)
-      lines.push("mxUSDT funding looks thin: " + usdtCoins + " coin" + (usdtCoins === 1 ? "" : "s")
+      lines.push("MxUSD funding looks thin: " + usdtCoins + " coin" + (usdtCoins === 1 ? "" : "s")
         + " for " + nBids + " bid rungs.");
     if (!lines.length) return "";
     return lines.join("\n") + "\nUse Split funding coins first if you want more funding coins before publishing.";

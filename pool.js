@@ -343,7 +343,7 @@ var PandaSynthetic = {};
     var r = Synthetic.routeFor(pools, askSide, amount), got, paid, eff;
     if (!r || !r.ok) return P.d(0);
     got = P.d(askSide ? r.totalOut : r.totalIn);     /* the MINIMA leg */
-    paid = P.d(askSide ? r.totalIn : r.totalOut);    /* the mxUSDT leg */
+    paid = P.d(askSide ? r.totalIn : r.totalOut);    /* the MxUSD leg */
     if (!got.gt(0) || !paid.gt(0)) return P.d(0);
     if (limitPrice) {
       eff = paid.div(got);
