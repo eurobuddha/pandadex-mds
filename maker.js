@@ -141,6 +141,66 @@ var PandaMaker = PandaMaker || {};
     max = Number(b.maxActions || 0);
     return max > 0 && actions.length > max ? actions.slice(0, max) : actions;
   };
+  /* ---- MakerQuoteGuard (native MakerQuoteGuard) -------------------------------------------
+     A cycle decides its whole ladder up front and then posts each action through several async
+     node round-trips — a random id, a funding scan, txncheck, txnpost. By the time the fourth
+     action is signed the user may have disarmed, edited a rung, or the peg may have moved past
+     the reprice threshold. Checking `armed` once at the top of the cycle authorises every later
+     action with a fact that was only true at the start.
+
+     The guard captures the intent the cycle was authorised on, and revalidates it before each
+     action. It makes NO node call and fetches NO replacement quote — the caller passes in what
+     it already knows. A CANCEL is always allowed: withdrawing funds does not depend on the price
+     feed or on the ladder settings still being the ones that put them there. */
+  function num(a, b) {
+    if (a === null || a === undefined) return b === null || b === undefined;
+    return b !== null && b !== undefined && P.d(a).cmp(P.d(b)) === 0;
+  }
+  function levelsSame(a, b) {
+    var i, x, y;
+    if (!a || !b) return a === b;
+    if (a.length !== b.length) return false;
+    for (i = 0; i < a.length; i++) {
+      x = a[i]; y = b[i];
+      if (!x || !y) { if (x !== y) return false; }
+      else if (!num(x.price, y.price) || !num(x.sizeMinima, y.sizeMinima)) return false;
+    }
+    return true;
+  }
+  M.same = function (a, b) {
+    return !!a && !!b && !a.pegged === !b.pegged && num(a.stepPct, b.stepPct) && num(a.skewPct, b.skewPct)
+      && num(a.repricePct, b.repricePct) && levelsSame(a.asks, b.asks) && levelsSame(a.bids, b.bids);
+  };
+  /* A missing or negative threshold means "cannot tell" — treat it as moved and refuse. */
+  function moved(before, after, threshold) {
+    if (threshold === null || threshold === undefined || P.d(threshold).lt(0)) return true;
+    return P.d(before).cmp(P.d(after)) !== 0 && M.worthRepricing(before, after, threshold);
+  }
+  M.guard = function (ladder, revision, mid, widen) {
+    var planned = M.desired(mid, ladder, widen);
+    return { allows: function (state, action) {
+      var current, now, i, a, b;
+      if (!action) return false;                      /* an action we cannot classify is not authorised */
+      if (action.kind === M.K_CANCEL) return true;
+      if (!state || !state.storageHealthy || !state.armed) return false;
+      if (String(revision) !== String(state.revision)) return false;
+      if (!M.same(ladder, state.ladder)) return false;
+      if (!ladder.pegged) return true;
+      if (!state.quoteOk) return false;
+      current = P.d(state.mid || 0);
+      if (!current.gt(0) || !P.d(mid || 0).gt(0)) return false;
+      if (moved(mid, current, ladder.repricePct)) return false;
+      /* An ageing reference can require a wider spread even when its midpoint has not moved,
+         so recheck the widening with the same ladder math and the same threshold. */
+      now = M.desired(current, ladder, state.widen);
+      if (planned.length !== now.length) return false;
+      for (i = 0; i < planned.length; i++) {
+        a = planned[i]; b = now[i];
+        if (a.id !== b.id || moved(a.price, b.price, ladder.repricePct)) return false;
+      }
+      return true;
+    } };
+  };
   M.minRemainderFor = function (slot) {
     var fivePct = P.d(slot.sizeMinima).mul("0.05"), floor = Decimal.max(fivePct, P.d(P.MIN_ORDER)), half = P.d(slot.sizeMinima).div(2).toDecimalPlaces(P.DP, Decimal.ROUND_DOWN);
     return P.down(Decimal.min(floor, half), P.DP);

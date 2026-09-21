@@ -347,7 +347,10 @@ PDService.storeObservedFill = function(spentCoin, order, size, price, takerBuy, 
 };
 PDService.makerDefault = function() {
   return {pegged:true, stepPct:"0.20", levelCount:3, askSize:"0", bidSize:"0", manualMid:"0",
-    skewPct:"0", repricePct:"0.25", armed:false, asks:[], bids:[], slots:{}, tombstones:{}, lastActedMid:null};
+    skewPct:"0", repricePct:"0.25", armed:false, asks:[], bids:[], slots:{}, tombstones:{}, lastActedMid:null,
+    /* Bumped on every accepted settings write. A callback queued before the change must not be
+       reauthorised by the settings that replaced it. */
+    quoteRevision:"0"};
 };
 PDService.levelIn = function(level) { return {price:PandaDEX.plain(PDService.dec(level && level.price)), sizeMinima:PandaDEX.plain(PDService.dec(level && (level.sizeMinima || level.size)))}; };
 PDService.levelOut = function(level) { return {price:PDService.dec(level && level.price), sizeMinima:PDService.dec(level && level.sizeMinima)}; };
@@ -365,6 +368,7 @@ PDService.normalizeMaker = function(raw) {
   for (i = 0; i < d.asks.length; i++) d.asks[i] = PDService.levelIn(d.asks[i]);
   for (i = 0; i < d.bids.length; i++) d.bids[i] = PDService.levelIn(d.bids[i]);
   d.slots = d.slots && typeof d.slots === "object" ? d.slots : {}; d.tombstones = d.tombstones && typeof d.tombstones === "object" ? d.tombstones : {};
+  d.quoteRevision = String(d.quoteRevision === undefined || d.quoteRevision === null ? "0" : d.quoteRevision);
   return d;
 };
 PDService.makerLadderConfig = function() {
@@ -390,11 +394,28 @@ PDService.loadMaker = function(done) {
     });
   });
 };
-PDService.saveMaker = function(done) {
+/* Native MakerConfig.storageHealthy / saveUserAction. The slot records ARE the maker's memory of
+   which on-chain order is which; if they cannot be written, the next cycle plans against a ladder
+   it can no longer recognise and posts a second one on top of real funds. A failed write therefore
+   latches quoting off, and only an explicit user save clears it — never a retry of our own. */
+PDService.saveMaker = function(done, userAction) {
   var json = PDService.escSql(JSON.stringify(PDService.maker.cfg || PDService.makerDefault()));
   MDS.sql("DELETE FROM `maker_state` WHERE `id`=1", function() {
-    MDS.sql("INSERT INTO `maker_state` (`id`,`json`) VALUES (1,'" + json + "')", function() { if (done) done(); });
+    MDS.sql("INSERT INTO `maker_state` (`id`,`json`) VALUES (1,'" + json + "')", function(result) {
+      var ok = !(result && result.status === false);
+      if (!ok) { PDService.maker.storageFailed = true; PDService.setStage("Maker settings could not be saved — quoting is paused. Check storage and save again."); }
+      else if (userAction) PDService.maker.storageFailed = false;
+      if (done) done(ok);
+    });
   });
+};
+/* Everything the guard revalidates against, read at the moment of use. */
+PDService.makerGuardState = function() {
+  var c = PDService.maker.cfg || PDService.makerDefault(), pegged = !!c.pegged, feedMid = pegged ? PandaPrice.mid() : null;
+  return {storageHealthy:!PDService.maker.storageFailed, armed:c.armed === true,
+    revision:c.quoteRevision || "0", ladder:PDService.makerLadderConfig(),
+    quoteOk:!pegged || (!PandaPrice.mustWithdraw() && PDService.dec(feedMid).gt(0)),
+    mid:feedMid, widen:pegged ? String(PandaPrice.widenFactor()) : "1"};
 };
 PDService.makerMid = function() {
   var mid = PandaPrice && PandaPrice.mid ? PDService.maybeDec(PandaPrice.mid()) : null;
@@ -445,27 +466,37 @@ PDService.makerTombstone = function(orderId, createdBlock, lastAttemptBlock) {
   PDService.saveMaker();
 };
 PDService.makerSetStage = function(message) { if (message) PDService.setStage(message); };
-PDService.makerRun = function(actions, idx, mid, posted, chainBlock) {
-  var a, createOid, input, o, newWant;
+PDService.makerRun = function(actions, idx, mid, posted, chainBlock, guard) {
+  var a, createOid, input, o, newWant, stopped;
   if (idx >= actions.length) {
+    stopped = PDService.maker.guardStopped;
     PDService.maker.working = false;
+    PDService.maker.guardStopped = false;
     if (posted > 0 && PDService.dec(mid).gt(0)) PDService.maker.cfg.lastActedMid = PandaDEX.plain(mid);
-    PDService.saveMaker(function() { PDService.makerSetStage(posted > 0 ? "Maker: " + posted + " action" + (posted === 1 ? "" : "s") + " accepted — mining now" : "Maker: no adjustment could be posted — will retry"); PDService.snapshot(); });
+    PDService.saveMaker(function() { PDService.makerSetStage(stopped ? "Maker: prices or settings changed; remaining adjustments were not submitted" : posted > 0 ? "Maker: " + posted + " action" + (posted === 1 ? "" : "s") + " accepted — mining now" : "Maker: no adjustment could be posted — will retry"); PDService.snapshot(); });
     return;
   }
   PDService.maker.working = true;
   a = actions[idx];
+  /* Native MakerEngine: revalidate before EVERY action, and on refusal abandon the REST of the
+     cycle rather than skipping one action. lastCycleMs=0 lets the next book update replan at once
+     — or withdraw the ladder, if what changed was the price feed going stale. */
+  if (guard && !guard.allows(PDService.makerGuardState(), a)) {
+    PDService.maker.guardStopped = true;
+    PDService.maker.lastCycleMs = 0;
+    return PDService.makerRun(actions, actions.length, mid, posted, chainBlock, guard);
+  }
   if (a.kind === PandaMaker.K_CREATE) {
     return PDService.cmd("random", function(rand) {
       createOid = rand && rand.status && rand.response && rand.response.random;
-      if (!createOid) { PDService.makerSetStage("Maker: CREATE failed — could not create order id"); return PDService.makerRun(actions, idx + 1, mid, posted, chainBlock); }
+      if (!createOid) { PDService.makerSetStage("Maker: CREATE failed — could not create order id"); return PDService.makerRun(actions, idx + 1, mid, posted, chainBlock, guard); }
       input = {buy:!a.slot.sell, minima:PandaDEX.plain(a.slot.sizeMinima), price:PandaDEX.plain(a.slot.price), gtc:true, minRem:PandaDEX.plain(PandaMaker.minRemainderFor(a.slot)), orderId:createOid};
       PandaTxn.create(PDService.cmd, PDService.identity, input, function(error, tx, orderId) {
-        if (error) { PDService.makerSetStage("Maker: CREATE failed — " + error); return PDService.makerRun(actions, idx + 1, mid, posted, chainBlock); }
+        if (error) { PDService.makerSetStage("Maker: CREATE failed — " + error); return PDService.makerRun(actions, idx + 1, mid, posted, chainBlock, guard); }
         PDService.makerRemember(a.slot, orderId, chainBlock);
         PDService.addPending(PandaPending.PLACE, {orderId:orderId, buy:!a.slot.sell, minima:input.minima, price:input.price});
         PDService.tell("POSTED", {message:"Maker rung submitted — it appears after confirmation", tx:tx});
-        PDService.makerRun(actions, idx + 1, mid, posted + 1, chainBlock);
+        PDService.makerRun(actions, idx + 1, mid, posted + 1, chainBlock, guard);
       });
     });
   }
@@ -473,25 +504,25 @@ PDService.makerRun = function(actions, idx, mid, posted, chainBlock) {
     o = a.order;
     newWant = o.sell ? PandaDEX.up(PDService.dec(o.locked).mul(a.slot.price), PandaDEX.DP) : PandaDEX.down(PDService.dec(o.locked).div(a.slot.price), PandaDEX.DP);
     return PandaTxn.relock(PDService.cmd, o, newWant, function(error, tx) {
-      if (error) { PDService.makerSetStage("Maker: RELOCK failed — " + error); return PDService.makerRun(actions, idx + 1, mid, posted, chainBlock); }
+      if (error) { PDService.makerSetStage("Maker: RELOCK failed — " + error); return PDService.makerRun(actions, idx + 1, mid, posted, chainBlock, guard); }
       if (PDService.maker.cfg.slots[a.slot.id]) PDService.maker.cfg.slots[a.slot.id].lastActionBlock = chainBlock;
       PDService.saveMaker(); PDService.addPending(PandaPending.EDIT, {orderId:o.orderId, coinid:o.coinid, buy:!o.sell, minima:PandaDEX.plain(o.minima), price:PandaDEX.plain(a.slot.price)});
       PDService.tell("POSTED", {message:"Maker rung reprice submitted — mining now", tx:tx});
-      PDService.makerRun(actions, idx + 1, mid, posted + 1, chainBlock);
+      PDService.makerRun(actions, idx + 1, mid, posted + 1, chainBlock, guard);
     });
   }
   if (a.kind === PandaMaker.K_CANCEL) {
     PDService.noteCancelled(a.order.coinid);
     PDService.noteCancelled(a.order.coinid);
     return PandaTxn.cancel(PDService.cmd, a.order, function(error, tx) {
-      if (error) { PDService.makerSetStage("Maker: CANCEL failed — " + error); return PDService.makerRun(actions, idx + 1, mid, posted, chainBlock); }
+      if (error) { PDService.makerSetStage("Maker: CANCEL failed — " + error); return PDService.makerRun(actions, idx + 1, mid, posted, chainBlock, guard); }
       PDService.makerForgetByOrderId(a.order.orderId); PDService.makerTombstone(a.order.orderId, chainBlock, chainBlock);
       PDService.addPending(PandaPending.CANCEL, {orderId:a.order.orderId, coinid:a.order.coinid, buy:!a.order.sell, minima:PandaDEX.plain(a.order.minima), price:PandaDEX.plain(a.order.price)});
       PDService.tell("POSTED", {message:"Maker rung cancellation submitted — mining now", tx:tx});
-      PDService.makerRun(actions, idx + 1, mid, posted + 1, chainBlock);
+      PDService.makerRun(actions, idx + 1, mid, posted + 1, chainBlock, guard);
     });
   }
-  PDService.makerRun(actions, idx + 1, mid, posted, chainBlock);
+  PDService.makerRun(actions, idx + 1, mid, posted, chainBlock, guard);
 };
 PDService.makerOnBook = function() {
   var c = PDService.maker.cfg, now = Date.now(), mid, desired, byOrderId, liveBySlot = {}, settling = {}, partial = {}, renew = {}, postedSizes = {}, dirty = false, k, r, o, complete, actions, ids;
@@ -542,7 +573,8 @@ PDService.makerOnBook = function() {
   if (!actions.length) return;
   PDService.maker.lastCycleMs = now;
   PDService.makerSetStage("Maker: " + actions.length + " adjustment" + (actions.length === 1 ? "" : "s") + (PDService.dec(mid).gt(0) ? " at mid " + PDService.dec(mid).toDecimalPlaces(6, Decimal.ROUND_HALF_UP).toFixed(6) : ""));
-  PDService.makerRun(actions, 0, mid, 0, PDService.block);
+  PDService.maker.guardStopped = false;
+  PDService.makerRun(actions, 0, mid, 0, PDService.block, PandaMaker.guard(PDService.makerLadderConfig(), c.quoteRevision || "0", mid, c.pegged ? String(PandaPrice.widenFactor()) : "1"));
 };
 PDService.makerSweepTombstones = function() {
   var c = PDService.maker.cfg, mineById, done = [], target = null, k, t, o;
@@ -1053,7 +1085,7 @@ PDService.limitWithPoolsInner = function(data) {
   }
 };
 PDService.actionRest = function(message) {
-  var i, order = null, data, amountD;
+  var i, order = null, data, amountD, previousMaker;
   if (message.type === "CANCEL") {
     data = message.data || {};
     for (i = 0; i < PDService.book.length; i++) if (PDService.book[i].coinid === data.coinid) order = PDService.book[i];
@@ -1106,10 +1138,18 @@ PDService.actionRest = function(message) {
   }
   if (message.type === "MAKER_SAVE" || message.type === "MAKER_PUBLISH" || message.type === "MAKER_APPLY") {
     data = message.data || {};
+    previousMaker = PDService.maker.cfg || PDService.makerDefault();
     PDService.maker.cfg = PDService.normalizeMaker(data.cfg || data);
+    /* Slot records and tombstones are what is ON CHAIN. They round-tripped through the page, so a
+       stale snapshot could hand back a ladder memory older than the truth — and a maker that
+       forgets a rung posts a second one on top of real funds. Keep the service's own. */
+    PDService.maker.cfg.slots = previousMaker.slots || {};
+    PDService.maker.cfg.tombstones = previousMaker.tombstones || {};
+    /* A settings write invalidates any action still queued under the settings it replaced. */
+    PDService.maker.cfg.quoteRevision = String(Number(previousMaker.quoteRevision || 0) + 1);
     if (message.type === "MAKER_PUBLISH") { PDService.maker.cfg.armed = true; PDService.maker.cfg.lastActedMid = null; PDService.maker.lastCycleMs = 0; }
     if (message.type === "MAKER_APPLY") PDService.maker.lastCycleMs = 0;
-    return PDService.saveMaker(function() { PDService.setStage(message.type === "MAKER_PUBLISH" ? "Maker published — first cycle starting" : "Maker settings saved"); PDService.refresh(); });
+    return PDService.saveMaker(function(ok) { if (ok) PDService.setStage(message.type === "MAKER_PUBLISH" ? "Maker published — first cycle starting" : "Maker settings saved"); PDService.refresh(); }, true);
   }
   if (message.type === "MAKER_WITHDRAW") return PDService.makerWithdraw();
   if (!message.type) return;

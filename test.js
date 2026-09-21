@@ -1092,6 +1092,73 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   var sent=[], result;
   PandaTxn.checkPost(function(c,cb){sent.push(c);cb({status:true});},"duplicate",["txncreate id:duplicate","txninput id:duplicate coinid:0x99dd","txninput id:duplicate coinid:0x99DD"],function(e){result=e;});assert(result);assert.strictEqual(sent.length,0);
 })();
+/* ---- MakerQuoteGuard (native MakerQuoteGuard) ----
+   A cycle plans its whole ladder, then posts each action through several async node round-trips.
+   Checking `armed` once at the top authorises the fourth action with a fact that was true only at
+   the start. Every one of these cases is a real action that must NOT be submitted. */
+(function(){
+  function ladder(over){
+    var c={pegged:true,stepPct:"1",skewPct:"0",repricePct:"0.25",
+           asks:[PandaMaker.level(0,"2")],bids:[PandaMaker.level(0,"3")]}, k;
+    for(k in (over||{})) if(over.hasOwnProperty(k)) c[k]=over[k];
+    return c;
+  }
+  function state(over){
+    var st={storageHealthy:true,armed:true,revision:"7",ladder:ladder(),quoteOk:true,mid:"10",widen:"1"}, k;
+    for(k in (over||{})) if(over.hasOwnProperty(k)) st[k]=over[k];
+    return st;
+  }
+  var create=PandaMaker.action(PandaMaker.K_CREATE,{id:"A1"},null,""),
+      relock=PandaMaker.action(PandaMaker.K_RELOCK,{id:"A1"},null,""),
+      cancel=PandaMaker.action(PandaMaker.K_CANCEL,null,{coinid:"0xee0006"},""),
+      g=PandaMaker.guard(ladder(),"7","10","1");
+
+  assert(g.allows(state(),create),"an unchanged, armed, on-peg cycle must proceed");
+  assert(g.allows(state(),relock),"...for every non-cancel kind");
+
+  /* Withdrawal never depends on the feed or on the settings that put the funds there. */
+  assert(g.allows(state({armed:false,storageHealthy:false,quoteOk:false,revision:"9"}),cancel),
+    "a CANCEL must survive everything — it is how funds come home");
+
+  assert(!g.allows(state({armed:false}),create),"disarmed mid-cycle must stop the next action");
+  assert(!g.allows(state({revision:"8"}),create),"settings rewritten under a queued action");
+  assert(!g.allows(state({storageHealthy:false}),create),
+    "a maker that cannot record a slot must not create one — it would forget and repost it");
+  assert(!g.allows(state({quoteOk:false}),create),"no usable quote");
+  assert(!g.allows(state({mid:"0"}),create),"a zero mid is not a price");
+  assert(!g.allows(null,create),"no state at all is not permission");
+  assert(!g.allows(state(),null),"an action we cannot classify is not authorised");
+
+  /* A rung edited while the cycle was in flight invalidates it, size as well as price. */
+  assert(!g.allows(state({ladder:ladder({asks:[PandaMaker.level(0,"5")]})}),create),"a rung size changed");
+  assert(!g.allows(state({ladder:ladder({stepPct:"2"})}),create),"the step changed");
+  assert(!g.allows(state({ladder:ladder({skewPct:"1"})}),create),"the skew changed");
+  assert(!g.allows(state({ladder:ladder({pegged:false})}),create),"the peg was turned off");
+  assert(!g.allows(state({ladder:ladder({bids:[]})}),create),"a whole side was removed");
+
+  /* The peg moving past the reprice threshold invalidates the prices we planned. */
+  assert(g.allows(state({mid:"10.01"}),create),"a move under the threshold is still the same ladder");
+  assert(!g.allows(state({mid:"11"}),create),"a move past the threshold must stop the cycle");
+
+  /* An ageing reference can require a WIDER spread even when its midpoint has not moved at all —
+     native rechecks the widening for exactly this, with the same ladder math. */
+  assert(!g.allows(state({widen:"5"}),create),"a widened spread is a different ladder");
+
+  /* An unpegged ladder has no feed to go stale: only armed/revision/settings matter. */
+  var man=PandaMaker.guard(ladder({pegged:false}),"7","0","1");
+  assert(man.allows(state({ladder:ladder({pegged:false}),quoteOk:false,mid:"0"}),create),
+    "an unpegged ladder must not be stopped by the price feed");
+  assert(!man.allows(state({ladder:ladder({pegged:false}),armed:false}),create));
+
+  /* A missing threshold means "cannot tell", and cannot-tell must refuse, not permit. */
+  var noThresh=PandaMaker.guard(ladder({repricePct:null}),"7","10","1");
+  assert(!noThresh.allows(state({ladder:ladder({repricePct:null}),mid:"10.0001"}),create),
+    "an unknown reprice threshold must refuse rather than wave the action through");
+
+  assert(PandaMaker.same(ladder(),ladder()),"identical ladders compare equal");
+  assert(!PandaMaker.same(ladder(),ladder({asks:[]})));
+  assert(!PandaMaker.same(null,ladder()));
+})();
 /* Native 0.4.17 + 0.4.18: a placeholder must follow the real state. Native shipped a fix that told
    a connected user to connect, and the review of THAT found the open-orders placeholder wrong in
    the opposite direction. Loading, failed and not-connected are three different answers and the
