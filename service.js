@@ -257,16 +257,18 @@ PDService.loadFill = function(done) {
     });
   });
 };
-PDService.recordFill = function() {
+PDService.recordFill = function(status, note) {
   var m = PDService.fillMeta;
   if (!m) return;
   PDService.fillMeta = null; PDService.saveFill();
   PDService.lastFillLine = (m.buy ? "Bought " : "Sold ") + PandaDEX.plain(m.size) + " MINIMA @ " + PandaDEX.plain(m.price);
   PandaTape.addMyTrade({spentcoin:m.spentcoin, timems:Date.now(), block:PDService.block, price:m.price,
     size:m.size, buy:m.buy, maker:false, orderid:"", txpowid:m.txpowid || "", sourceKind:m.sourceKind || "BOOK",
-    sourceCoinids:(m.sourceCoinids || []).join(" "), verificationStatus:"LOCAL_VERIFIED",
-    verificationNote:"Source coins spent and expected proceeds observed", verifiedBlock:PDService.block}, function(added) {
-      if (added) PDService.notify("Trade complete: " + (m.buy ? "Bought " : "Sold ") + PandaDEX.plain(m.size) + " MINIMA @ " + PandaDEX.plain(m.price) + " MxUSD. Funds are confirming.");
+    sourceCoinids:(m.sourceCoinids || []).join(" "), verificationStatus:status || "LOCAL_VERIFIED",
+    verificationNote:note || "Source coins spent and expected proceeds observed", verifiedBlock:PDService.block}, function(added) {
+      if (added) PDService.notify(status
+        ? "Trade recorded UNVERIFIED: " + (m.buy ? "Bought " : "Sold ") + PandaDEX.plain(m.size) + " MINIMA @ " + PandaDEX.plain(m.price) + " MxUSD. " + note + "."
+        : "Trade complete: " + (m.buy ? "Bought " : "Sold ") + PandaDEX.plain(m.size) + " MINIMA @ " + PandaDEX.plain(m.price) + " MxUSD. Funds are confirming.");
       PDService.loadTape(function() { PDService.snapshot(); });
     });
 };
@@ -743,11 +745,27 @@ PDService.proceedsArrived = function(done) {
   var m = PDService.fillMeta, tok, amount;
   if (!m || !PDService.identity) return done(false);
   tok = m.buy ? "0x00" : PandaDEX.USDT;                 /* a buy receives MINIMA, a sell MxUSD */
-  amount = m.buy ? m.size : PandaDEX.plain(PandaDEX.d(m.size).mul(m.price));
+  /* m.proceeds is the exact output amount the transaction was built with. The fallback is only
+     for a fill saved by a version before 0.4.19 and is the old, rounded guess. */
+  amount = m.proceeds !== undefined && m.proceeds !== null && m.proceeds !== ""
+    ? m.proceeds : m.buy ? m.size : PandaDEX.plain(PandaDEX.d(m.size).mul(m.price));
   PDService.cmd("coins simplestate:true address:" + PDService.identity.address + " tokenid:" + tok +
     " coinage:0 depth:" + Math.max(12, PDService.SWEEP_DEADLINE_BLOCKS + 6), function(reply) {
       done(PandaVerify.proceedsPresent(reply, tok, amount, Number(m.postBlock || 0)));
     });
+};
+/* The deadline above only fires while one of OUR coins is still visible. Once they are all gone
+   but the proceeds do not verify, there was nothing left to time out — the trade sat "waiting for
+   confirmation" forever and the user found out it had worked by looking at ASSETS. Our coins being
+   spent means something happened; not matching the proceeds means we cannot prove what. So record
+   it rather than erase it, but never claim a verification we do not have. */
+PDService.giveUpOnFill = function() {
+  var m = PDService.fillMeta;
+  if (!m || !PDService.fillBlock || PDService.block - PDService.fillBlock <= PDService.SWEEP_DEADLINE_BLOCKS) return;
+  if (PDService.restQueueCoins) return;            /* the remainder path has its own deadline */
+  PDService.fillCoins = null; PDService.fillBlock = 0; PDService.filling = {};
+  PDService.recordFill("LOCAL_ONLY", "Source coins spent; expected proceeds were not matched on this node");
+  PDService.setStage("Your coins were spent, but the proceeds could not be matched \u2014 check ASSETS and TRADES. Nothing further will be posted.");
 };
 PDService.reconcileFill = function(book) {
   var i, j, coinid;
@@ -768,10 +786,13 @@ PDService.reconcileFill = function(book) {
      simply wait — the deadline above is what eventually gives up. */
   PDService.verifyingFill = true;
   PDService.allSourcesSpent(PDService.fillCoins.slice(), 0, function(spent) {
+    /* NOT calling giveUpOnFill here: it says "your coins were spent", and in this branch the node
+       says they were not. A local snapshot that has run ahead of the node resolves itself; if it
+       does not, the sourceStillLive deadline above is what catches it. */
     if (!spent) { PDService.verifyingFill = false; return; }
     PDService.proceedsArrived(function(arrived) {
       PDService.verifyingFill = false;
-      if (!arrived) return;
+      if (!arrived) return PDService.giveUpOnFill();
       PDService.fillCoins = null; PDService.fillBlock = 0; PDService.filling = {};
       PDService.recordFill();
       if (!PDService.restQueueCoins) PDService.setStage("\u2713 " + (PDService.lastFillLine || "Trade confirmed") + " \u2014 proceeds are confirming, see ASSETS");
@@ -1048,6 +1069,10 @@ PDService.limitWithPoolsInner = function(data) {
         PDService.fillBlock = PDService.block;
         PDService.fillMeta = {spentcoin:comp.sourceCoinIds[0], price:PandaDEX.plain(comp.effectivePrice),
           size:PandaDEX.plain(comp.totalMinima), buy:!!data.buy, txpowid:tx || "",
+          /* The ONE proceeds output this transaction pays us (buildCompositeSteps). Not
+             size x effectivePrice: that price is totalUsdt/totalMinima ROUNDED, so multiplying
+             it back does not return totalUsdt and the coin never matched. */
+          proceeds:PandaDEX.plain(data.buy ? comp.totalMinima : comp.totalUsdt),
           postBlock:PDService.block,
           sourceKind:(PandaComposite.poolCount(comp) > 0 && comp.orderTakes.length) ? "BOOK+POOL" : (PandaComposite.poolCount(comp) > 0 ? "POOL" : "BOOK"),
           sourceCoinids:comp.sourceCoinIds.slice()}; PDService.saveFill();
@@ -1085,6 +1110,7 @@ PDService.limitWithPoolsInner = function(data) {
       PDService.fillBlock = PDService.block;
       PDService.fillMeta = {spentcoin:plan.takes[0].order.coinid, price:PandaDEX.plain(plan.average),
         size:PandaDEX.plain(plan.totalMinima), buy:!!data.buy, txpowid:tx || "", postBlock:PDService.block, sourceKind:"BOOK",
+        proceeds:PandaDEX.plain(data.buy ? plan.totalMinima : plan.totalUsdt),
         sourceCoinids:PDService.fillCoins.slice()}; PDService.saveFill();
       PDService.refresh();
     });

@@ -3,6 +3,31 @@
 Newest first. Each entry names the native PandaDEX version it reaches parity with, and the specific
 on-chain failure it prevents.
 
+## [0.4.19] — a trade that worked never said so
+
+Reported live on 0.4.18: a blended SELL of 1160.09 MINIMA settled on chain, the log stopped at
+"Blended trade submitted — waiting for confirmation", and nothing else was ever said. The only sign
+it had worked was the MxUSD appearing in ASSETS.
+
+The proceeds gate asked the node for a coin worth `size x effectivePrice`. `effectivePrice` is
+`totalUsdt / totalMinima` rounded to `PRICE_DP`, so multiplying it back does not return `totalUsdt`.
+The transaction pays ONE proceeds output of exactly `totalUsdt` (`buildCompositeSteps`), so the gate
+could never match. A BUY happened to work — its expected amount IS `totalMinima` — which is why this
+stayed hidden. It affected the plain multi-order sweep too, not just blended trades.
+
+`fillMeta` now records the planned proceeds total the transaction was actually built with, and the
+gate verifies against that.
+
+Second defect, found looking for the first: the "never confirmed" deadline lived inside the branch
+that runs *while one of our coins is still visible*. Once they were all spent but the proceeds did
+not verify, there was nothing left to time out — it waited forever in silence. It now gives up after
+`SWEEP_DEADLINE_BLOCKS` and records the fill as `LOCAL_ONLY` with the reason, because coins spent
+means something happened (never lose a trade) and an unmatched payout means we cannot prove what
+(never invent one).
+
+The APK does not have either defect: it records `buy ? plan.totalMinima : plan.totalUsdt` and applies
+its deadline regardless of coin visibility. No APK change was needed.
+
 ## [0.4.18] — every repriced bid read as part-filled, and froze
 
 Ports native `MakerPosition`. "Has this rung been partly eaten?" compared the order's MINIMA against

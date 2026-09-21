@@ -1092,6 +1092,44 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   var sent=[], result;
   PandaTxn.checkPost(function(c,cb){sent.push(c);cb({status:true});},"duplicate",["txncreate id:duplicate","txninput id:duplicate coinid:0x99dd","txninput id:duplicate coinid:0x99DD"],function(e){result=e;});assert(result);assert.strictEqual(sent.length,0);
 })();
+/* ---- the confirmation that never came (reported live, 0.4.18) ----
+   A blended SELL of 1160.09 MINIMA settled on chain, but the log stopped at "Blended trade
+   submitted \u2014 waiting for confirmation" and never said another word; the user found out by
+   looking at ASSETS. The proceeds gate asked the node for a coin worth size x effectivePrice, and
+   effectivePrice is totalUsdt/totalMinima ROUNDED to PRICE_DP \u2014 multiplying it back does not
+   return totalUsdt. The transaction pays ONE proceeds output of exactly totalUsdt, so the gate
+   could never pass, and with our coins already gone there was no deadline left to fire either. */
+(function(){
+  /* A ratio that does not survive the round trip: 1160.09 MINIMA for 3.77 MxUSD. */
+  var totalMinima=PandaDEX.d("1160.09"), totalUsdt=PandaDEX.d("3.77");
+  var effective=totalUsdt.div(totalMinima).toDecimalPlaces(PandaDEX.PRICE_DP, Decimal.ROUND_HALF_UP);
+  var rebuilt=totalMinima.mul(effective);
+  assert(!rebuilt.eq(totalUsdt), "fixture is pointless unless the rounding actually loses the value");
+
+  function reply(amount){return {status:true,response:[{coinid:"0xee0031",tokenid:PandaDEX.USDT,
+    tokenamount:PandaDEX.plain(amount),amount:PandaDEX.plain(amount),created:"100"}]};}
+  /* What the node really shows: one coin worth the planned total. */
+  assert(PandaVerify.proceedsPresent(reply(totalUsdt),PandaDEX.USDT,PandaDEX.plain(totalUsdt),100),
+    "the actual proceeds total must verify");
+  assert(!PandaVerify.proceedsPresent(reply(totalUsdt),PandaDEX.USDT,PandaDEX.plain(rebuilt),100),
+    "THE BUG: the price-derived figure does not match the coin, so the trade never confirmed");
+
+  /* A BUY happened to work, which is why this hid: its expected amount IS totalMinima. */
+  function mreply(a){return {status:true,response:[{coinid:"0xee0032",tokenid:"0x00",
+    amount:PandaDEX.plain(a),created:"100"}]};}
+  assert(PandaVerify.proceedsPresent(mreply(totalMinima),"0x00",PandaDEX.plain(totalMinima),100));
+
+  /* The service must record the planned total, for both taker paths, and must not have gone back
+     to deriving it from the price. */
+  var src=fs.readFileSync("service.js","utf8");
+  assert.strictEqual(src.split("proceeds:PandaDEX.plain(data.buy ?").length-1, 2,
+    "both the blended and the plain sweep path must record their planned proceeds");
+  assert(src.indexOf("? m.proceeds : m.buy ? m.size")>0, "the check must prefer the recorded total");
+  /* And once our coins are gone, something must eventually be said. */
+  assert(src.indexOf("PDService.giveUpOnFill = function")>0, "the give-up path must exist");
+  assert(src.indexOf("return PDService.giveUpOnFill();")>0,
+    "...and be reached when the proceeds do not verify — otherwise the fill waits forever");
+})();
 /* ---- MakerPosition (native MakerPosition) ----
    The reason this exists: a BUY order's MINIMA is the WANT side, and repricing changes it with no
    fill at all. Comparing that against the requested size marked every repriced bid part-filled,
