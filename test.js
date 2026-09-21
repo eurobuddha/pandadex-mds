@@ -1092,6 +1092,40 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   var sent=[], result;
   PandaTxn.checkPost(function(c,cb){sent.push(c);cb({status:true});},"duplicate",["txncreate id:duplicate","txninput id:duplicate coinid:0x99dd","txninput id:duplicate coinid:0x99DD"],function(e){result=e;});assert(result);assert.strictEqual(sent.length,0);
 })();
+/* Stock MiniNumber precision. Balances AND coin amounts carry up to 64 significant digits and 44
+   decimal places; the 44-digit order parser refused them, so no wallet holding more than SAFE_COINS
+   coins of a token could fund anything — every trade died on "Could not read the available balance."
+   Native 0.4.20 / FundingCoinsTest.stockPrecisionBalancesAndCoinsFundATrade. */
+(function(){
+  function ok(rows){return {status:true,response:rows};}
+  var dp44="12345678901234567890123456789012345678901234";      /* 44 decimal places */
+  var sendable="1234."+dp44;                                     /* 48 significant digits */
+  var coinAmount="617."+dp44;                                    /* 47 significant digits */
+  var error,selected,total;
+  PandaFunding.select(function(c,cb){
+    if(c==="balance tokenid:0x00")return cb(ok([{tokenid:"0x00",coins:10,sendable:"100"}]));
+    if(c==="keys")return cb(ok({keys:[{publickey:"0xaa"}]}));
+    if(c.indexOf("runscript")===0)return cb(ok({parseok:true,script:{address:"0x11"}}));
+    if(c.indexOf("balance")===0)return cb(ok([{tokenid:"0x00",coins:3,sendable:sendable}]));
+    cb(ok([{coinid:"0x9931",address:"0x11",amount:coinAmount,tokenid:"0x00",state:[]}]));
+  },"0x00","1",{},20,function(e,c,sum){error=e;selected=c;total=sum;});
+  assert.strictEqual(error,null,"a stock-precision balance must still fund a trade: "+error);
+  assert.strictEqual(selected.length,1);
+  assert(total.gte(1));
+  assert(PandaFunding.value(selected[0]).eq(coinAmount),"the coin amount must survive parsing exactly");
+  PandaCoinLock.release(selected);
+  /* The neighbour must NOT move: amounts the app BUILDS keep the 44-digit order bound. */
+  assert.strictEqual(PandaSafety.decimal(sendable),null,"the order parser must still refuse 48 digits");
+  assert(PandaSafety.balanceDecimal(sendable).eq(sendable));
+  assert.strictEqual(PandaSafety.balanceDecimal("1"+"0".repeat(64)),null,"65 significant digits is not a balance");
+  assert.strictEqual(PandaSafety.balanceDecimal("0."+"9".repeat(45)),null,"45 decimal places is not a balance");
+  ["1e999999999","1e-999999999","NaN","Infinity",true,{},"1,000",null]
+    .forEach(function(v){assert.strictEqual(PandaSafety.balanceDecimal(v),null,"the balance parser accepted "+v);});
+  /* The display path too — native fixed this in 0.4.16 and the port never got it. */
+  var m=PandaBalance.meta({status:true,response:{tokenid:"0x00",confirmed:sendable,sendable:sendable,unconfirmed:"0",coins:3}},1000,"0x00");
+  assert.strictEqual(m.at,1000,"a stock-precision balance must display, not read as unknown");
+  assert(m.sendable.eq(sendable));
+})();
 /* Native BalanceDisplayTest strict read cases. */
 (function(){
   function row(){return {tokenid:"0x00",confirmed:"10",sendable:"8",unconfirmed:"0",coins:"2"};}
