@@ -2,6 +2,9 @@
 var assert=require("assert"), fs=require("fs"), vm=require("vm");
 global.Decimal=require("./decimal.js");
 ["safety.js","covenant.js","funding.js","balance.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js","zip.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
+// Historical layout fixtures use abbreviated IDs and intentionally isolate the durable claim store.
+// The real claim store + transaction engine are exercised in input-claims.test.cjs with full IDs and SQLite.
+global.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,handle,cb){cb(true);}};
 PandaTxn.holdsKey=function(){return true;}; /* test wallet explicitly owns fixture signing keys */
 var C={coinid:"0x01",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xee0006","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
@@ -155,7 +158,7 @@ assert(wholePlan.orderTakes.length===1&&wholePlan.orderTakes[0].partial===false)
 assert(PandaPool.scriptArg("LET fx=MAX(dx 0)*5/1000").indexOf("*5/1000")>0);
 assert.strictEqual(PandaPool.scriptArg('a"b'),'"a\\"b"');
 var builtCalls=[], builtOutcome=null;
-function comboCmd(command, cb){builtCalls.push(command);if(command.indexOf("balance tokenid:")===0)return cb({status:true,response:[{tokenid:PandaDEX.USDT,coins:1,sendable:"1"}]});if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("coins relevant:true")===0)return cb({status:true,response:[{coinid:"0xfa01",tokenid:PandaDEX.USDT,tokenamount:"1",amount:"1",address:"0xfb01"}]});if(command.indexOf("newscript")===0)return cb({status:true});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xee000d"}});cb({status:true});}
+function comboCmd(command, cb){builtCalls.push(command);if(command.indexOf("balance tokenid:")===0)return cb({status:true,response:[{tokenid:PandaDEX.USDT,coins:1,sendable:"1"}]});if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("coins relevant:true")===0)return cb({status:true,response:[{coinid:"0xfa01",tokenid:PandaDEX.USDT,tokenamount:"1",amount:"1",address:"0xfb01"}]});if(command.indexOf("newscript")===0)return cb({status:true});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({status:true,response:{txpowid:"0xee000d"}});cb({status:true});}
 PandaTxn.fillComposite(comboCmd,{address:"0xee001c"},combo,true,function(err,tx){builtOutcome={err:err,tx:tx};});
 assert.strictEqual(builtOutcome&&builtOutcome.err,null,"composite build: "+JSON.stringify(builtOutcome));
 var comboCreate=builtCalls.filter(function(c){return c.indexOf("txncreate id:combo_")===0;})[0], comboId=comboCreate.split("id:")[1];
@@ -176,7 +179,7 @@ assert.strictEqual(layoutInputs[layoutInputs.length-1],"txninput id:tx coinid:0x
 /* Regression: Minima's txncheck says `validamounts`, never `amounts`. A valid owner-cancel
    must post, and must sign specifically with the owner key embedded in port 0. */
 var calls=[], outcome=null;
-function fakeCmd(command, cb){calls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({pending:true,response:{txpowid:"0xee002a"}});cb({status:true});}
+function fakeCmd(command, cb){calls.push(command);if(command.indexOf("txnexport")===0)return cb({status:true,response:{data:"0x00"}});if(command.indexOf("txncheck")===0)return cb({status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}});if(command.indexOf("txnpost")===0)return cb({status:true,response:{txpowid:"0xee002a"}});cb({status:true});}
 PandaTxn.cancel(fakeCmd,sell,function(err,tx){outcome={err:err,tx:tx};});
 assert.deepStrictEqual(outcome,{err:null,tx:"0xee002a"});assert(calls.some(function(c){return c.indexOf("txnsign")===0&&c.indexOf("publickey:0xee0006")>0;}));
 calls=[];outcome=null;PandaTxn.relock(fakeCmd,sell,"30",function(err,tx){outcome={err:err,tx:tx};});
@@ -497,6 +500,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
       return mds;
     })()
   };
+  sandbox.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,handle,cb){cb(true);}};
   vmmod.createContext(sandbox);
   /* Exactly the list service.js loads, in the same order. */
   ["safety.js","decimal.js","covenant.js","funding.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
@@ -599,11 +603,12 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
         else if (c.indexOf("random") === 0) r = { status:true, response:{ random:"0xee0020" } };
         else if (c.indexOf("txnexport") === 0) r = { status:true, response:{ data:"0x00" } };
         else if (c.indexOf("txncheck") === 0) r = { status:true, response:{ valid:{ scripts:true, basic:true, mmrproofs:true }, validamounts:true, validtransaction:true, allsignaturesvalid:true } };
-        else if (c.indexOf("txnpost") === 0) r = { pending:true, response:{ txpowid:"0xee002a" } };
+        else if (c.indexOf("txnpost") === 0) r = { status:true, response:{ txpowid:"0xee002a" } };
         if (cb) cb(r);
       }
     }
   };
+  sandbox.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,handle,cb){cb(true);}};
   vmmod.createContext(sandbox);
   ["safety.js","decimal.js","covenant.js","funding.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
    "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js"].forEach(function (f) {
@@ -663,7 +668,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
         else if(c.indexOf("random")===0) r={status:true,response:{random:"0xee0020"}};
         else if(c.indexOf("txnexport")===0) r={status:true,response:{data:"0x00"}};
         else if(c.indexOf("txncheck")===0) r={status:true,response:{valid:{scripts:true,basic:true,mmrproofs:true},validamounts:true,validtransaction:true,allsignaturesvalid:true}};
-        else if(c.indexOf("txnpost")===0) r={pending:true,response:{txpowid:"0xee000e"}};
+        else if(c.indexOf("txnpost")===0) r={status:true,response:{txpowid:"0xee000e"}};
         else if(c.indexOf("coins")===0){
           var rows=[];
           if(c.indexOf("address:"+SENT)>0)                                   /* the pool beacon */
@@ -680,6 +685,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
       }
     }
   };
+  sandbox.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,handle,cb){cb(true);}};
   vmmod.createContext(sandbox);
   ["safety.js","decimal.js","covenant.js","funding.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
    "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js"].forEach(function(f){

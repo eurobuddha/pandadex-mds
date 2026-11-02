@@ -33,4 +33,10 @@ sql("MERGE INTO state_fixture (id,json) KEY(id) VALUES (1,'first')");sql("MERGE 
 check(sql("SELECT json FROM state_fixture WHERE id=1")[0].JSON==="second","H2 atomic replacement works");
 check(PandaSafety.decimal("1e999999999")===null,"Rhino bounded decimal parsing");
 check(PandaFunding.count({status:true,response:[{tokenid:"0x00",coins:"8"}]},"0x00")===8,"Rhino funding parser");
+load("input-claims.js");
+var coin="0x"+Array(65).join("a"),ok=null;
+PoolInputClaims.load([coin],function(v){ok=v;});check(ok===true,"fresh reserve is available in H2");
+PoolInputClaims.post([coin],"swap_fixture",function(v){ok=v;});check(ok===true,"submitted claim commits in H2");
+load("input-claims.js"); // new JS context state, same persistent SQL
+PoolInputClaims.load([coin],function(v){ok=v;});check(ok===false,"submitted reserve stays held after restart");
 connection.close();print("PASS "+checks+" Rhino/H2 assertions");
