@@ -3,6 +3,17 @@
 Newest first. Each entry names the native PandaDEX version it reaches parity with, and the specific
 on-chain failure it prevents.
 
+## [0.4.22] — a transaction the node refused kept its coins locked forever
+
+0.4.21 saved every posted input so it could never be spent twice, but nothing ever removed it. When the
+node answered `txnpost` with `status:false` (nothing broadcast), those coins stayed excluded for good: your
+own funding coins, a pool's live reserve coin, or an order coin you could then never cancel from the app.
+
+- `PoolInputClaims.release(ids, handle)` frees the claims of ONE transaction handle, and only for a definite
+  "nothing was broadcast": a `status:false`, not-pending reply, or a claim write that failed before `txnpost`.
+- An unanswered, pending or uncertain post stays held, as before. Another transaction's claims are never touched.
+- Native parity: PandaDEX Android 0.4.26.
+
 ## [0.4.20] — the expanded activity log read upside down and you had to scroll to close it
 
 Reported live. Three separate problems in one dialog:

@@ -4,7 +4,7 @@ global.Decimal=require("./decimal.js");
 ["safety.js","covenant.js","funding.js","balance.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js","maker.js","price.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js","zip.js","export.js","explorer.js"].forEach(function(f){vm.runInThisContext(fs.readFileSync(f,"utf8"),{filename:f});});
 // Historical layout fixtures use abbreviated IDs and intentionally isolate the durable claim store.
 // The real claim store + transaction engine are exercised in input-claims.test.cjs with full IDs and SQLite.
-global.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,handle,cb){cb(true);}};
+global.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,handle,cb){cb(true);},release:function(ids,handle,cb){if(cb)cb(true);}};
 PandaTxn.holdsKey=function(){return true;}; /* test wallet explicitly owns fixture signing keys */
 var C={coinid:"0x01",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xee0006","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
@@ -500,7 +500,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
       return mds;
     })()
   };
-  sandbox.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,handle,cb){cb(true);}};
+  sandbox.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,handle,cb){cb(true);},release:function(ids,handle,cb){if(cb)cb(true);}};
   vmmod.createContext(sandbox);
   /* Exactly the list service.js loads, in the same order. */
   ["safety.js","decimal.js","covenant.js","funding.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
@@ -608,7 +608,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
       }
     }
   };
-  sandbox.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,handle,cb){cb(true);}};
+  sandbox.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,handle,cb){cb(true);},release:function(ids,handle,cb){if(cb)cb(true);}};
   vmmod.createContext(sandbox);
   ["safety.js","decimal.js","covenant.js","funding.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
    "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js"].forEach(function (f) {
@@ -685,7 +685,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
       }
     }
   };
-  sandbox.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,handle,cb){cb(true);}};
+  sandbox.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,handle,cb){cb(true);},release:function(ids,handle,cb){if(cb)cb(true);}};
   vmmod.createContext(sandbox);
   ["safety.js","decimal.js","covenant.js","funding.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
    "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js"].forEach(function(f){

@@ -39,4 +39,7 @@ PoolInputClaims.load([coin],function(v){ok=v;});check(ok===true,"fresh reserve i
 PoolInputClaims.post([coin],"swap_fixture",function(v){ok=v;});check(ok===true,"submitted claim commits in H2");
 load("input-claims.js"); // new JS context state, same persistent SQL
 PoolInputClaims.load([coin],function(v){ok=v;});check(ok===false,"submitted reserve stays held after restart");
+PoolInputClaims.release([coin],"other_handle",function(){});PoolInputClaims.load([coin],function(v){ok=v;});check(ok===false,"another handle cannot free the claim");
+PoolInputClaims.release([coin],"swap_fixture",function(v){ok=v;});check(ok===true,"a rejected post's claim is deleted in H2");
+load("input-claims.js");PoolInputClaims.load([coin],function(v){ok=v;});check(ok===true,"released reserve is free after restart");
 connection.close();print("PASS "+checks+" Rhino/H2 assertions");
