@@ -8,7 +8,7 @@ global.PoolInputClaims={check:function(ids,cmd,cb){cb(true);},post:function(ids,
 PandaTxn.holdsKey=function(){return true;}; /* test wallet explicitly owns fixture signing keys */
 var C={coinid:"0x01",tokenid:"0x00",amount:"10",created:"100",state:{"0":"0xee0006","1":"0x"+"a".repeat(64),"2":"20","3":PandaDEX.USDT,"4":"0x55","5":"1","7":"0","8":"0"}};
 var sell=PandaDEX.order(C); assert(sell&&sell.sell&&sell.price.eq(2));
-var poison=JSON.parse(JSON.stringify(C)); poison.state["3"]="0x00"; assert.strictEqual(PandaDEX.order(poison),null);
+var poison=JSON.parse(JSON.stringify(C)); poison.state["3"]="0x00"; assert(untakeable(PandaDEX.order(poison)));
 var bid=JSON.parse(JSON.stringify(C)); bid.coinid="0xee0002";bid.tokenid=PandaDEX.USDT;bid.tokenamount="20";bid.state["2"]="10";bid.state["3"]="0x00";bid.state["5"]="0";var buy=PandaDEX.order(bid);assert(buy&&buy.price.eq(2));
 var p=PandaBook.plan([sell],true,"3",null,110);assert.strictEqual(p.takes.length,1);assert(p.takes[0].partial&&p.takes[0].remainder.eq(7)&&p.totalUsdt.eq(6));
 function cloneOrder(base, id, amount, created) { var c=JSON.parse(JSON.stringify(base)); c.coinid=id; c.amount=amount; c.created=String(created || 100); return PandaDEX.order(c); }
@@ -359,16 +359,16 @@ assert(goodPay.add(goodWant).gte(PandaDEX.d(W)));
 /* ---- hostile orders (native OrderValidationTest) ---- */
 function poisoned(mutate) { var c=JSON.parse(JSON.stringify(C)); mutate(c); return PandaDEX.order(c); }
 /* A payout addressed back at the book would let a filler recycle the funds into the covenant. */
-assert.strictEqual(poisoned(function(c){c.state["1"]=PandaDEX.ADDR;}),null);
+assert(untakeable(poisoned(function(c){c.state["1"]=PandaDEX.ADDR;})));
 /* A payout address that is not a 64-hex address at all. */
-assert.strictEqual(poisoned(function(c){c.state["1"]="0xnope";}),null);
+assert(untakeable(poisoned(function(c){c.state["1"]="0xnope";})));
 /* Amounts finer than the chain's grain. */
-assert.strictEqual(poisoned(function(c){c.state["2"]="20.000000001";}),null);
-assert.strictEqual(poisoned(function(c){c.state["8"]="0.000000001";}),null);
+assert(untakeable(poisoned(function(c){c.state["2"]="20.000000001";})));
+assert(untakeable(poisoned(function(c){c.state["8"]="0.000000001";})));
 /* A negative minimum remainder. */
-assert.strictEqual(poisoned(function(c){c.state["8"]="-1";}),null);
+assert(untakeable(poisoned(function(c){c.state["8"]="-1";})));
 /* A sell that wants MINIMA back, or a buy locked in the wrong asset. */
-assert.strictEqual(poisoned(function(c){c.state["3"]="0x00";}),null);
+assert(untakeable(poisoned(function(c){c.state["3"]="0x00";})));
 /* A hostile order must not be reachable through the planner either. */
 assert.strictEqual(PandaBook.plan([poisoned(function(c){c.state["1"]=PandaDEX.ADDR;})].filter(Boolean),true,"1",null,110).takes.length,0);
 
@@ -1381,4 +1381,15 @@ console.log("PandaDEX pure tests passed");
   var seen=[]; PandaBook.scan(function(c,cb){seen.push(c);cb({status:true,response:[]});},function(){});
   assert(seen.some(function(c){return c.indexOf(PandaDEX.ADDR)>0;})&&seen.some(function(c){return c.indexOf(PandaDEX.ADDR_V5)>0;}), "the book scans both covenants");
   console.log("ok 0.4.25 V6 covenant for new orders; V5 still served");
+})();
+
+/* 0.4.26: a parseable but unfillable coin stays in the book for its OWNER (cancel/collect) but no taker path uses it. */
+function untakeable(o){return o===null||o.fillable===false;}
+(function(){
+  var c=JSON.parse(JSON.stringify(C)); c.state["2"]="20.000000001"; var o=PandaDEX.order(c);
+  assert(o&&o.fillable===false, "a remainder given >8 decimals is still visible to its owner");
+  var ok2=JSON.parse(JSON.stringify(o)); var good=PandaDEX.order(JSON.parse(JSON.stringify(C)));
+  assert(PandaBook.plan([good],good.sell,"1",null,110).takes.length>0, "control: the same order, fillable, is planned");
+  assert.strictEqual(PandaBook.plan([o],o.sell,"1",null,110).takes.length,0, "but no taker plan uses it");
+  console.log("ok 0.4.26 unfillable coins stay visible to their owner, never to takers");
 })();
