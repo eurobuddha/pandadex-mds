@@ -1393,3 +1393,11 @@ function untakeable(o){return o===null||o.fillable===false;}
   assert.strictEqual(PandaBook.plan([o],o.sell,"1",null,110).takes.length,0, "but no taker plan uses it");
   console.log("ok 0.4.26 unfillable coins stay visible to their owner, never to takers");
 })();
+/* 0.4.27: only the precision case stays in the book; a coin no path can ever spend (wrong token pair) is dropped again. */
+(function(){
+  var c=JSON.parse(JSON.stringify(C)); c.state["3"]="0x00";
+  assert.strictEqual(PandaDEX.order(c),null, "a wrong token pair can never be spent: dropped");
+  var d=JSON.parse(JSON.stringify(C)); d.state["2"]="20.000000001";
+  var o=PandaDEX.order(d); assert(o&&o.fillable===false, "the >8-decimal remainder stays for its owner");
+  console.log("ok 0.4.27 never-spendable coins dropped; precision-only kept for the owner");
+})();
