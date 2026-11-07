@@ -1358,3 +1358,12 @@ assert.strictEqual(PandaVerify.proceedsPresent(reply([{tokenid:PandaDEX.USDT,amo
   inclusion.response.found=false;PandaHistory.findSpends(node,["0xac01"],function(r){found=r;});assert.strictEqual(Object.keys(found).length,0,"mempool/unincluded transactions cannot become spend proof");
 })();
 console.log("PandaDEX pure tests passed");
+/* 0.4.24 (review 7 Nov): a duplicated port reads as its FIRST entry (what the covenant binds), and the book scan asks
+   for the state array, never simplestate. */
+(function(){
+  var dup={coinid:"0x01",state:[{port:2,data:"30"},{port:2,data:"999"}]};
+  assert.strictEqual(PandaDEX.state(dup,2),"30");
+  var seen=[]; PandaBook.scan(function(c,cb){seen.push(c);cb({status:true,response:[]});},function(){});
+  assert(seen.length>0 && seen.every(function(c){return c.indexOf("simplestate")<0;}), "book scan must not ask for simplestate: "+seen[0]);
+  console.log("ok 0.4.24 duplicate ports read first; book scan uses the state array");
+})();
