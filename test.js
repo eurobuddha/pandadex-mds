@@ -713,6 +713,18 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   var meta = JSON.parse(vmmod.runInContext("JSON.stringify(PDService.fillMeta||null)", sandbox));
   assert(meta && meta.sourceKind === "POOL", "a pool-only fill should record source POOL, got " + (meta && meta.sourceKind));
   assert.strictEqual(meta.txpowid, "0xee000e");
+  /* C-3 (review 7 Nov): an order owned by an identity this service ran under before, whose key this wallet no longer
+     holds (a PandaBear <-> BlackBear key-mode switch), pauses new trading until it is cancelled from the old mode. */
+  vmmod.runInContext("PDService.knownIdentities['0X" + "C".repeat(64) + "']=true;"
+    + "PDService.book=[{coinid:'0xc301',ownerPk:'0x" + "C".repeat(64) + "',wantAddr:'0x" + "c".repeat(64) + "',addr:PandaDEX.ADDR}];"
+    + "PDService.checkOrphans();", sandbox);
+  assert.strictEqual(vmmod.runInContext("PDService.orphans.length", sandbox), 1, "an order of another key mode is flagged");
+  sent.length = 0;
+  vmmod.runInContext("PDService.action({type:'LIMIT',data:{buy:false,minima:'50',price:'0.001',gtc:true,minRem:'0'}});", sandbox);
+  assert(!sent.some(function(c){ return c.indexOf("txncreate") === 0 || c.indexOf("send ") === 0; }), "no new order while an orphaned one is live");
+  vmmod.runInContext("PDService.book=[];PDService.checkOrphans();", sandbox);
+  assert.strictEqual(vmmod.runInContext("PDService.orphans.length", sandbox), 0, "trading resumes once it is gone");
+  console.log("ok C-3 orders of another key mode pause trading until cancelled");
 })();
 /* ---- THE PHANTOM LADDER (reported from mainnet) ----
    Three 1000-MINIMA ask rungs are cancelled, refunding exactly 1000 MINIMA each to the wallet's
