@@ -716,9 +716,11 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   /* C-3 (review 7 Nov): an order owned by an identity this service ran under before, whose key this wallet no longer
      holds (a PandaBear <-> BlackBear key-mode switch), pauses new trading until it is cancelled from the old mode. */
   vmmod.runInContext("PDService.knownIdentities['0X" + "C".repeat(64) + "']=true;"
-    + "PDService.book=[{coinid:'0xc301',ownerPk:'0x" + "C".repeat(64) + "',wantAddr:'0x" + "c".repeat(64) + "',addr:PandaDEX.ADDR}];"
+    + "PDService.book=[{coinid:'0xc301',orderId:'0xab01',ownerPk:'0x" + "C".repeat(64) + "',wantAddr:'0x" + "c".repeat(64) + "',addr:PandaDEX.ADDR}];"
     + "PDService.checkOrphans();", sandbox);
-  assert.strictEqual(vmmod.runInContext("PDService.orphans.length", sandbox), 1, "an order of another key mode is flagged");
+  assert.strictEqual(vmmod.runInContext("PDService.orphans.length", sandbox), 0, "an order I never placed (planted with my old public key) is ignored");
+  vmmod.runInContext("PDService.myOrderIds['0XAB01']=true;PDService.checkOrphans();", sandbox);
+  assert.strictEqual(vmmod.runInContext("PDService.orphans.length", sandbox), 1, "an order I placed under another key mode is flagged");
   sent.length = 0;
   vmmod.runInContext("PDService.action({type:'LIMIT',data:{buy:false,minima:'50',price:'0.001',gtc:true,minRem:'0'}});", sandbox);
   assert(!sent.some(function(c){ return c.indexOf("txncreate") === 0 || c.indexOf("send ") === 0; }), "no new order while an orphaned one is live");
