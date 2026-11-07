@@ -183,7 +183,7 @@ function fakeCmd(command, cb){calls.push(command);if(command.indexOf("txnexport"
 PandaTxn.cancel(fakeCmd,sell,function(err,tx){outcome={err:err,tx:tx};});
 assert.deepStrictEqual(outcome,{err:null,tx:"0xee002a"});assert(calls.some(function(c){return c.indexOf("txnsign")===0&&c.indexOf("publickey:0xee0006")>0;}));
 calls=[];outcome=null;PandaTxn.relock(fakeCmd,sell,"30",function(err,tx){outcome={err:err,tx:tx};});
-assert.deepStrictEqual(outcome,{err:null,tx:"0xee002a"});assert(calls.some(function(c){return c.indexOf("txnoutput")===0&&c.indexOf("address:"+PandaDEX.ADDR)>0&&c.indexOf("storestate:true")>0;}));assert(calls.some(function(c){return c==="txnstate id:"+calls[0].split("id:")[1]+" port:2 value:30";}));
+assert.deepStrictEqual(outcome,{err:null,tx:"0xee002a"});assert(calls.some(function(c){return c.indexOf("txnoutput")===0&&c.indexOf("address:"+sell.addr)>0&&sell.addr===PandaDEX.ADDR_V5&&c.indexOf("storestate:true")>0;}));assert(calls.some(function(c){return c==="txnstate id:"+calls[0].split("id:")[1]+" port:2 value:30";}));
 assert(PandaTxn.newWantForPrice(sell,"3").eq(30));
 assert(PandaTxn.newWantForPrice(buy,"4").eq(5));
 /* Covenant timing constants must stay in a workable order (native OrderValidationTest pins the
@@ -1366,4 +1366,19 @@ console.log("PandaDEX pure tests passed");
   var seen=[]; PandaBook.scan(function(c,cb){seen.push(c);cb({status:true,response:[]});},function(){});
   assert(seen.length>0 && seen.every(function(c){return c.indexOf("simplestate")<0;}), "book scan must not ask for simplestate: "+seen[0]);
   console.log("ok 0.4.24 duplicate ports read first; book scan uses the state array");
+})();
+/* 0.4.25 (review 7 Nov): V6 covenant for new orders; V5 coins still served at their own address. */
+(function(){
+  function coin(addr){return {coinid:"0x0606",address:addr,tokenid:"0x00",amount:"100",created:10,
+    state:[{port:0,data:"0x0A0A"},{port:1,data:"0xBB11223344556677889900AABBCCDDEEFF00112233445566778899AABBCCDDEE"},{port:2,data:"50"},
+      {port:3,data:PandaDEX.USDT},{port:4,data:"0xAB12"},{port:5,data:"1"},{port:6,data:"0.5"},{port:7,data:"1"},{port:8,data:"1"}]};}
+  assert.notStrictEqual(PandaDEX.ADDR.toUpperCase(),PandaDEX.ADDR_V5.toUpperCase());
+  assert(PandaDEX.script.indexOf("STATE(0) EQ o AND STATE(1) EQ a AND STATE(3) EQ k")>0, "V6 pins the remainder's ports by type and value");
+  assert(PandaDEX.SCRIPT_V5.indexOf("SAMESTATE(0 1) AND SAMESTATE(3 5) AND SAMESTATE(7 8)")>0);
+  var v6=PandaDEX.order(coin(PandaDEX.ADDR)), v5=PandaDEX.order(coin(PandaDEX.ADDR_V5));
+  assert(v6&&v6.addr===PandaDEX.ADDR&&v5&&v5.addr===PandaDEX.ADDR_V5, "an order remembers the covenant it sits at");
+  assert.strictEqual(PandaDEX.order(coin("0x1234")),null, "a coin at any other address is not an order");
+  var seen=[]; PandaBook.scan(function(c,cb){seen.push(c);cb({status:true,response:[]});},function(){});
+  assert(seen.some(function(c){return c.indexOf(PandaDEX.ADDR)>0;})&&seen.some(function(c){return c.indexOf(PandaDEX.ADDR_V5)>0;}), "the book scans both covenants");
+  console.log("ok 0.4.25 V6 covenant for new orders; V5 still served");
 })();
