@@ -720,7 +720,9 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
     + "PDService.checkOrphans();", sandbox);
   assert.strictEqual(vmmod.runInContext("PDService.orphans.length", sandbox), 0, "an order I never placed (planted with my old public key) is ignored");
   vmmod.runInContext("PDService.myOrderIds['0XAB01']=true;PDService.checkOrphans();", sandbox);
-  assert.strictEqual(vmmod.runInContext("PDService.orphans.length", sandbox), 1, "an order I placed under another key mode is flagged");
+  assert.strictEqual(vmmod.runInContext("PDService.orphans.length", sandbox), 0, "a coin copying my orderId and old key, never seen as mine, is ignored");
+  vmmod.runInContext("PDService.myCoins['0XC301']=true;PDService.checkOrphans();", sandbox);
+  assert.strictEqual(vmmod.runInContext("PDService.orphans.length", sandbox), 1, "a coin I saw as mine under the old key is flagged");
   sent.length = 0;
   vmmod.runInContext("PDService.action({type:'LIMIT',data:{buy:false,minima:'50',price:'0.001',gtc:true,minRem:'0'}});", sandbox);
   assert(!sent.some(function(c){ return c.indexOf("txncreate") === 0 || c.indexOf("send ") === 0; }), "no new order while an orphaned one is live");
