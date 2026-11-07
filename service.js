@@ -1185,7 +1185,11 @@ PDService.actionRest = function(message) {
 MDS.init(function(message) {
   var packet;
   if (message.event === "inited") PDService.boot();
-  else if (message.event === "NEWBLOCK") PDService.cmd("block", function(result) { var tip=PandaSafety.tipBlock(result); if(tip>0) { PDService.block=tip; PDService.refresh(); } });
+  else if (message.event === "NEWBLOCK") {
+    PDService.cmd("block", function(result) { var tip=PandaSafety.tipBlock(result); if(tip>0) { PDService.block=tip; PDService.refresh(); } });
+    // review 7 Nov (C-1): free input claims whose post provably never happened (two-phase, >= 10 min, unspent, not in mempool)
+    if (typeof PoolInputClaims !== "undefined") PoolInputClaims.sweepUnposted(PDService.cmd, Date.now());
+  }
   else if (message.event === "MDSCOMMS" && message.data && !message.data.public) {
     try { packet = JSON.parse(message.data.message || "{}"); if (packet.origin === "ui") PDService.action(packet); }
     catch (error) { PDService.tell("ERROR", {message:"Bad request"}); }

@@ -42,4 +42,13 @@ PoolInputClaims.load([coin],function(v){ok=v;});check(ok===false,"submitted rese
 PoolInputClaims.release([coin],"other_handle",function(){});PoolInputClaims.load([coin],function(v){ok=v;});check(ok===false,"another handle cannot free the claim");
 PoolInputClaims.release([coin],"swap_fixture",function(v){ok=v;});check(ok===true,"a rejected post's claim is deleted in H2");
 load("input-claims.js");PoolInputClaims.load([coin],function(v){ok=v;});check(ok===true,"released reserve is free after restart");
+// review 7 Nov (C-1): a claim whose post never happened is swept after SWEEP_MS; one in the mempool stays held
+var coin2="0x"+Array(65).join("b"),coin3="0x"+Array(65).join("c"),freed=-1;
+PoolInputClaims.post([coin2,coin3],"lost_post",function(v){ok=v;});check(ok===true,"two uncertain claims held");
+var node=function(c,cb){cb(c.indexOf(coin2)>0?{status:true,response:[{coinid:coin2,spent:false}]}:{status:true,response:[]});};
+PoolInputClaims.sweepUnposted(node,1000,function(n){freed=n;});check(freed===0,"first sweep only notes the claims");
+PoolInputClaims.sweepUnposted(node,1000+5*60000,function(n){freed=n;});check(freed===0,"nothing released before 10 minutes");
+PoolInputClaims.sweepUnposted(node,1000+11*60000,function(n){freed=n;});check(freed===1,"the provably unposted claim is released");
+PoolInputClaims.load([coin2],function(v){ok=v;});check(ok===true,"never-posted input usable again");
+PoolInputClaims.load([coin3],function(v){ok=v;});check(ok===false,"in-mempool input stays held");
 connection.close();print("PASS "+checks+" Rhino/H2 assertions");
