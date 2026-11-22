@@ -730,6 +730,97 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   assert.strictEqual(vmmod.runInContext("PDService.orphans.length", sandbox), 0, "trading resumes once it is gone");
   console.log("ok C-3 orders of another key mode pause trading until cancelled");
 })();
+/* ---- TAKE-ONLY LIMIT (0.4.32): take what crosses, never rest ----
+   A client sweeping its FAST book first sends the on-chain share with takeOnly:true; nothing may be left resting.
+   Same mock node as the end-to-end harness above: one resting bid 0xba01 (10 MINIMA wanted at 2 MxUSD each). */
+(function () {
+  var vmmod = require("vm"), fsmod = require("fs");
+  function boot() {
+    var ADDR = null, MYADDR = "0x" + "b".repeat(64), sent = [], inited = null, told = [];
+    function coinsFor(cmdstr) {
+      if (cmdstr.indexOf("address:" + ADDR) > 0)
+        return [{ coinid:"0xba01", tokenid:"0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90", tokenamount:"20", amount:"20", created:"990",
+                  state:{ "0":"0xee0030", "1":"0x"+"c".repeat(64), "2":"10", "3":"0x00", "4":"0xba01", "5":"0", "7":"0", "8":"0" } }];
+      if (cmdstr.indexOf("coins relevant:true") === 0) return [{ coinid:"0xfa01", tokenid:"0x00", amount:"100000", address:MYADDR }];
+      return [];
+    }
+    var sandbox = {
+      Object:Object, Array:Array, Function:Function, String:String, Number:Number, Boolean:Boolean, Date:Date, Math:Math, JSON:JSON, RegExp:RegExp,
+      Error:Error, TypeError:TypeError, isNaN:isNaN, isFinite:isFinite, parseInt:parseInt, parseFloat:parseFloat,
+      MDS: { init:function (cb) { inited = cb; }, load:function () {}, log:function () {}, notify:function () {},
+        sql:function (q, cb) { if (cb) cb({ status:true, rows:[] }); }, comms:{ solo:function (m, cb) { if (cb) cb(); } }, net:{ GET:function (u, cb) { if (cb) cb({ status:false }); } },
+        cmd:function (c, cb) {
+          sent.push(c);
+          var r = { status:true };
+          if (c.indexOf("runscript") === 0) r = { status:true, response:{ parseok:true, script:{ address:c.indexOf("RETURN SIGNEDBY(")>=0?MYADDR:ADDR } } };
+          else if (c.indexOf("getaddress") === 0) r = { status:true, response:{ address:MYADDR, publickey:"0xee001e", miniaddress:"MxABC" } };
+          else if (c.indexOf("keys action:list") === 0) r = { status:true, response:[{ publickey:"0xee001e" }] };
+          else if (c.indexOf("scripts") === 0) r = { status:true, response:[{ address:MYADDR }] };
+          else if (c.indexOf("balance tokenid:") === 0) r = { status:true, response:[{ tokenid:c.split("tokenid:")[1].split(" ")[0], coins:1, sendable:"100000" }] };
+          else if (c.indexOf("block") === 0) r = { status:true, response:{ block:1000 } };
+          else if (c.indexOf("coins") === 0) r = { status:true, response:coinsFor(c) };
+          else if (c.indexOf("random") === 0) r = { status:true, response:{ random:"0xee0020" } };
+          else if (c.indexOf("txnexport") === 0) r = { status:true, response:{ data:"0x00" } };
+          else if (c.indexOf("txncheck") === 0) r = { status:true, response:{ valid:{ scripts:true, basic:true, mmrproofs:true }, validamounts:true, validtransaction:true, allsignaturesvalid:true } };
+          else if (c.indexOf("txnpost") === 0) r = { status:true, response:{ txpowid:"0xee002a" } };
+          if (cb) cb(r);
+        } }
+    };
+    sandbox.PoolInputClaims = { check:function (ids, cmd, cb) { cb(true); }, post:function (ids, handle, cb) { cb(true); }, release:function (ids, handle, cb) { if (cb) cb(true); } };
+    vmmod.createContext(sandbox);
+    ["safety.js","decimal.js","covenant.js","funding.js","signlock.js","book.js","pool.js","composite.js","txn.js","tape.js",
+     "maker.js","price.js","verifier.js","pending.js","stats.js","split.js","chain.js","history.js"].forEach(function (f) { vmmod.runInContext(fsmod.readFileSync(f, "utf8"), sandbox, { filename:f }); });
+    ADDR = vmmod.runInContext("PandaDEX.ADDR", sandbox);
+    vmmod.runInContext(fsmod.readFileSync("service.js", "utf8"), sandbox, { filename:"service.js" });
+    inited({ event:"inited" });
+    sandbox.__told = told;
+    vmmod.runInContext("var __creates = 0, __create = PandaTxn.create; PandaTxn.create = function () { __creates++; return __create.apply(PandaTxn, arguments); };"
+      + "var __tell = PDService.tell; PDService.tell = function (t, d) { __told.push({ type:t, message:d && d.message }); return __tell.apply(PDService, arguments); };", sandbox);
+    return { sent:sent, told:told, run:function (code) { return vmmod.runInContext(code, sandbox); } };
+  }
+  function limit(h, data) { h.sent.length = 0; h.run("PDService.action({type:'LIMIT',data:" + JSON.stringify(data) + "});"); }
+  function posted(h) { return h.sent.some(function (c) { return c.indexOf("txnpost") === 0; }); }
+  function said(h) { var t = h.told.filter(function (x) { return x.type === "POSTED" || x.type === "ERROR"; }); return t[t.length - 1]; }
+  var h, last;
+
+  /* full cross: 5 of the bid's 10 at limit 1 -> traded, nothing rests, no remainder line */
+  h = boot(); limit(h, { buy:false, minima:"5", price:"1", gtc:true, minRem:"0", takeOnly:true });
+  assert(posted(h), "take-only full cross: the trade was posted");
+  assert.strictEqual(h.run("PDService.restQueue"), null, "take-only full cross: nothing queued to rest");
+  assert.strictEqual(h.run("__creates"), 0, "take-only full cross: no resting order created");
+  assert.strictEqual(h.run("PDService.stage"), "Posted — waiting for a block to confirm your sell of 5 MINIMA");
+
+  /* partial cross: 15 at limit 1, only the bid's 10 cross -> 10 traded, the 5 reported, never rested */
+  h = boot(); limit(h, { buy:false, minima:"15", price:"1", gtc:true, minRem:"0", takeOnly:true });
+  assert(posted(h), "take-only partial: the crossing part was posted");
+  assert.strictEqual(h.run("PDService.restQueue"), null, "take-only partial: restQueue stays empty");
+  assert.strictEqual(h.run("PDService.restQueueCoins"), null);
+  assert.strictEqual(h.run("__creates"), 0, "take-only partial: no PandaTxn.create");
+  assert.strictEqual(h.run("PDService.stage"), "Posted — waiting for a block to confirm your sell of 10 MINIMA — 5 MINIMA did not cross 1 and was not placed (take-only)");
+  last = said(h);
+  assert.strictEqual(JSON.stringify(last), JSON.stringify({ type:"POSTED", message:"Trade submitted — waiting for confirmation — 5 MINIMA did not cross 1 and was not placed (take-only)" }));
+  h.run("PDService.restReady && PDService.restReady([])");
+  assert.strictEqual(h.run("__creates"), 0, "take-only partial: nothing rests later either");
+
+  /* nothing crosses: limit 3 is above the bid's 2 -> ERROR, nothing sent */
+  h = boot(); limit(h, { buy:false, minima:"5", price:"3", gtc:true, minRem:"0", takeOnly:true });
+  last = said(h);
+  assert.strictEqual(JSON.stringify(last), JSON.stringify({ type:"ERROR", message:"Nothing on-chain crosses 3. Nothing was sent." }));
+  assert(!h.sent.some(function (c) { return /^(txncreate|txninput|txnsign|txnpost|send )/.test(c); }), "take-only nothing crosses: no transaction");
+  assert.strictEqual(h.run("__creates"), 0);
+  assert.strictEqual(h.run("PDService.busy"), false);
+
+  /* the unchanged default path: the same partial without the flag queues the 5 to rest; nothing crossing rests in full */
+  h = boot(); limit(h, { buy:false, minima:"15", price:"1", gtc:true, minRem:"0" });
+  assert.strictEqual(h.run("PDService.stage"), "Posted — waiting for a block to confirm your sell of 10 MINIMA");
+  assert.strictEqual(h.run("JSON.stringify(PDService.restQueue)"), JSON.stringify({ buy:false, minima:"5", price:"1", gtc:true, minRem:"0" }));
+  assert.strictEqual(h.run("JSON.stringify(PDService.restQueueCoins)"), JSON.stringify(["0xba01"]));
+  h = boot(); limit(h, { buy:false, minima:"5", price:"3", gtc:true, minRem:"0" });
+  assert.strictEqual(h.run("__creates"), 1, "default: nothing crosses -> the order rests (PandaTxn.create)");
+  h = boot(); limit(h, { buy:false, minima:"5", price:"3", gtc:true, minRem:"0", takeOnly:"yes" });
+  assert.strictEqual(h.run("__creates"), 1, "only takeOnly === true changes anything");
+  console.log("ok take-only LIMIT: full, partial (remainder said, nothing rests), nothing crosses (ERROR), default unchanged");
+})();
 /* ---- THE PHANTOM LADDER (reported from mainnet) ----
    Three 1000-MINIMA ask rungs are cancelled, refunding exactly 1000 MINIMA each to the wallet's
    payout address. Three 1000-MINIMA bid rungs vanish in the same window. Every order a wallet
