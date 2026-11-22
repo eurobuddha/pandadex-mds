@@ -817,9 +817,18 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
   assert.strictEqual(h.run("JSON.stringify(PDService.restQueueCoins)"), JSON.stringify(["0xba01"]));
   h = boot(); limit(h, { buy:false, minima:"5", price:"3", gtc:true, minRem:"0" });
   assert.strictEqual(h.run("__creates"), 1, "default: nothing crosses -> the order rests (PandaTxn.create)");
-  h = boot(); limit(h, { buy:false, minima:"5", price:"3", gtc:true, minRem:"0", takeOnly:"yes" });
-  assert.strictEqual(h.run("__creates"), 1, "only takeOnly === true changes anything");
-  console.log("ok take-only LIMIT: full, partial (remainder said, nothing rests), nothing crosses (ERROR), default unchanged");
+  /* 0.4.33: takeOnly is strict — any value but true/false (absent = false) is REFUSED, never read as "rest it" */
+  [["yes", '"yes"'], ["true", '"true"'], [1, "1"], [null, "null"], [0, "0"], ["", '""']].forEach(function (v) {
+    h = boot(); limit(h, { buy:false, minima:"5", price:"3", gtc:true, minRem:"0", takeOnly:v[0] });
+    assert.strictEqual(JSON.stringify(said(h)), JSON.stringify({ type:"ERROR", message:"takeOnly must be true or false (got " + v[1] + "). Nothing was sent." }), "takeOnly " + v[1] + " refused");
+    assert.strictEqual(h.run("__creates"), 0, "takeOnly " + v[1] + ": nothing rests");
+    assert(!h.sent.some(function (c) { return /^(txncreate|txninput|txnsign|txnpost|send )/.test(c); }), "takeOnly " + v[1] + ": no transaction");
+  });
+  h = boot(); limit(h, { buy:false, minima:"15", price:"1", gtc:true, minRem:"0", takeOnly:"true" });
+  assert(!posted(h), "a crossing LIMIT with takeOnly \"true\" (a string) trades nothing either");
+  h = boot(); limit(h, { buy:false, minima:"5", price:"3", gtc:true, minRem:"0", takeOnly:false });
+  assert.strictEqual(h.run("__creates"), 1, "takeOnly false = the normal LIMIT (rests)");
+  console.log("ok take-only LIMIT: full, partial (remainder said, nothing rests), nothing crosses (ERROR), default unchanged, any takeOnly but true/false refused");
 })();
 /* ---- THE PHANTOM LADDER (reported from mainnet) ----
    Three 1000-MINIMA ask rungs are cancelled, refunding exactly 1000 MINIMA each to the wallet's
