@@ -384,6 +384,28 @@ assert.strictEqual(sp.takes.length,2);
 assert.strictEqual(sp.takes[0].order.coinid,"0xee000b");        /* best price first */
 assert.strictEqual(sp.takes[0].partial,false);             /* fill the best one whole... */
 assert.strictEqual(sp.takes[1].partial,true);              /* ...and only the last is partial */
+/* 0.4.34 TAKER SAFETY: the maker's ceil on a partial take's pay never makes the taker trade more than asked or past
+   its limit — the take shrinks by grains instead (review 22 Nov: selling 3.33333333 to a 0.3 bid took 3.33333334). */
+(function () {
+  function bid3(usdt, want){ var b=JSON.parse(JSON.stringify(C)); b.coinid="0xee00b3";b.tokenid=PandaDEX.USDT;b.tokenamount=usdt;b.state["2"]=want;b.state["3"]="0x00";b.state["5"]="0"; return PandaDEX.order(b); }
+  function ask3(minima, usdt){ var c=JSON.parse(JSON.stringify(C)); c.coinid="0xee00a3"; c.amount=minima; c.state["2"]=usdt; return PandaDEX.order(c); }
+  var b=bid3("3","10"), a=ask3("10","3"), p, t;
+  [[null],["0.3"]].forEach(function (lim) {
+    p=PandaBook.plan([b],false,"3.33333333",lim[0],110); t=p.takes[0];
+    assert.strictEqual([t.pay.toFixed(), t.lockedTake.toFixed(), p.totalMinima.toFixed(), t.remainder.toFixed()].join(" "), "3.3333333 0.99999999 3.3333333 2.00000001", "sell 3.33333333 to a 0.3 bid (limit " + lim[0] + "): delivers 3.3333333, never 3.33333334");
+    assert(t.lockedTake.div(t.pay).gte(PandaDEX.d("0.3")), "at or inside the bid's price");
+  });
+  p=PandaBook.plan([b],false,"1.00000001","0.3",110); t=p.takes[0];
+  assert(t.pay.lte(PandaDEX.d("1.00000001")) && t.lockedTake.gte(t.pay.mul("0.3")), "sell 1.00000001 at 0.3: within the amount and the limit (" + t.pay.toFixed() + " for " + t.lockedTake.toFixed() + ")");
+  assert.strictEqual(PandaBook.plan([b],false,"0.00000007","0.3",110).takes.length, 0, "7 grains cannot be sold at 0.3 inside the covenant's rounding: nothing, rather than 10 grains");
+  p=PandaBook.plan([a],true,"3.33333333","0.3",110); t=p.takes[0];
+  assert.strictEqual([t.minima.toFixed(), t.pay.toFixed()].join(" "), "3.3333333 0.99999999", "buy 3.33333333 from a 0.3 ask at limit 0.3: never pays 1 (0.3000000003)");
+  p=PandaBook.plan([a],true,"3.33333333",null,110); t=p.takes[0];
+  assert.strictEqual([t.minima.toFixed(), t.pay.toFixed()].join(" "), "3.33333333 1", "without a limit a buy keeps its size (the maker's ceil is the price of the grain)");
+  var sb=PandaBook.plan([ask3("10","3"), ask("0xee00a4","10","1",100)],true,"15",null,110);
+  assert.strictEqual(sb.takes.length, 2, "full takes are unchanged");
+  console.log("ok 0.4.34 a partial take never trades more than asked nor past the limit");
+})();
 /* A limit price excludes anything worse. */
 assert.strictEqual(PandaBook.plan([dear,cheap],true,"15","1",110).takes.length,1);
 /* An order too close to expiry is skipped: it could lapse while the sweep is still mining. */
