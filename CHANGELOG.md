@@ -3,6 +3,11 @@
 Newest first. Each entry names the native PandaDEX version it reaches parity with, and the specific
 on-chain failure it prevents.
 
+## [0.4.35] — a stranger's sentinel coin could put its text into a node command
+
+- SECURITY: a stranger's coin at the public PandaPools sentinel can no longer put its text into a node command. The pool scan (`pool.js` `Pool.scan`) read state ports 3-5 (owner payout address, owner key, KMIN) of any sentinel coin unchecked and pasted them into the covenant sent by `runscript`; the node splits every command on ";" (even inside quotes). `PDService.cmd` already refused ";" and control characters, so no second command ran, but a space-smuggled value still reached the node. Now `Pool.validParams` requires 0x + 64 hex for the key, address and tokenid and a plain positive decimal (at most 80 characters) for KMIN before any use; anything else is skipped. A refusal by `PDService.cmd` now also writes a `SECURITY` line to the node log.
+- New `inject.test.cjs` (run by `build.sh`) with `node-standin.cjs`, a stand-in node that splits commands exactly like the real one: the poisoned beacons through the real service's scan reach nothing (the old code asked the node to run them). The end-to-end pool fixture in `test.js` now uses a real-shaped beacon (32-byte hex, KMIN 20000).
+
 ## [0.4.22] — a transaction the node refused kept its coins locked forever
 
 0.4.21 saved every posted input so it could never be spent twice, but nothing ever removed it. When the

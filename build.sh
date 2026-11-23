@@ -28,6 +28,7 @@ fi
 # A broken build must never become a release.
 echo "Running tests..."
 node test.js
+node --test inject.test.cjs
 
 SHIP="index.html style.css fonts.css parity.css inter_var.ttf jetbrains_mono_var.ttf mds.js safety.js input-claims.js funding.js decimal.js covenant.js balance.js signlock.js book.js pool.js composite.js txn.js tape.js maker.js price.js verifier.js pending.js stats.js split.js chain.js history.js zip.js export.js explorer.js service.js favicon.png"
 

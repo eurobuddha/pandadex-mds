@@ -695,7 +695,7 @@ assert(scanQueries.some(function(c){return c.indexOf("coinage:0 depth:"+Math.flo
           var rows=[];
           if(c.indexOf("address:"+SENT)>0)                                   /* the pool beacon */
             rows=[{coinid:"0xee0008",tokenid:"0x00",amount:"0.000000001",created:"900",
-                   state:{"2":USDT,"3":"0xee0025","4":"0xee0026","5":"0"}}];
+                   state:{"2":USDT,"3":"0x"+"25".repeat(32),"4":"0x"+"26".repeat(32),"5":"20000"}}];   /* a real beacon: 32-byte hex, KMIN > 0 (0.4.35 validates) */
           else if(c.indexOf("address:"+POOL)>0)                              /* the reserves */
             rows=[{coinid:"0xfa04",tokenid:"0x00",amount:"2000",created:"950"},
                   {coinid:"0xfa05",tokenid:USDT,tokenamount:"10",amount:"10",created:"950"}];
